@@ -87,18 +87,33 @@ export interface NotificationEvent {
 }
 
 export function parseNotificationEvent(messageId: string, inputEvent: string): NotificationEvent {
+    console.log("++++++++++++++++++")
+    console.log(messageId, inputEvent)
+    console.log("++++++++++++++++++")
+
     const event = JSON.parse(inputEvent) as {
         eventType: keyof typeof awsToMailgunType
         mail: { messageId: string, timestamp: Date }
         open?: { timestamp: Date }
     }
-    return {
+
+    console.log("++++++++++++++++++")
+    console.log(event)
+    console.log("++++++++++++++++++")
+
+    const r = {
         notificationId: messageId,
         type: String(awsToMailgunType[event.eventType]).toLocaleLowerCase(),
         messageId: event.mail.messageId,
         timestamp: event.open?.timestamp || new Date(),
         raw: inputEvent,
     }
+
+    console.log("++++++++++++++++++")
+    console.log(r)
+    console.log("++++++++++++++++++")
+
+    return r
 }
 
 type MailgunEventPayload = Prisma.NewsletterNotificationsGetPayload<{
