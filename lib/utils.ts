@@ -87,8 +87,6 @@ export interface NotificationEvent {
 }
 
 export function parseNotificationEvent(messageId: string, inputEvent: string): NotificationEvent {
-    console.trace();
-
     console.log("++++++++++++++++++")
     console.log(messageId, inputEvent)
     console.log("++++++++++++++++++")
