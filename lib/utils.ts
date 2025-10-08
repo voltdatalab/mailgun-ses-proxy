@@ -87,6 +87,8 @@ export interface NotificationEvent {
 }
 
 export function parseNotificationEvent(messageId: string, inputEvent: string): NotificationEvent {
+    console.trace();
+
     console.log("++++++++++++++++++")
     console.log(messageId, inputEvent)
     console.log("++++++++++++++++++")
@@ -97,9 +99,9 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
         open?: { timestamp: Date }
     }
 
-    console.log("++++++++++++++++++")
+    console.log("------------------")
     console.log(event)
-    console.log("++++++++++++++++++")
+    console.log("------------------")
 
     const r = {
         notificationId: messageId,
@@ -109,9 +111,9 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
         raw: inputEvent,
     }
 
-    console.log("++++++++++++++++++")
+    console.log("******************")
     console.log(r)
-    console.log("++++++++++++++++++")
+    console.log("******************")
 
     return r
 }
