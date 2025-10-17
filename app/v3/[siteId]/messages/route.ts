@@ -12,6 +12,7 @@ export async function POST(req: Request, { params }: pathParam) {
 
     try {
         const data = formDataToObject(await req.formData())
+        console.log("data: ",data," | req.formData(): ",req.formData());
         // data.html, data.text
         const { messageId, batchId } = await addNewsletterToQueue(data, siteId, null)
         log.info({ messageId },"message queued to newsletter SQS",)
