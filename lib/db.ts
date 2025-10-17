@@ -7,7 +7,7 @@ import { PrismaClient } from "./generated"
 export const prisma = new PrismaClient()
 
 export async function createNewsletterBatchEntry(siteId: string, message: MailgunMessage) {
-    const batchId = message["v:email-id"] || "68e7cc9e309826000144b4e0";
+    const batchId = message["v:email-id"]
     const contents = safeStringify(message)
     const fromEmail = message.from
     return prisma.newsletterBatch.create({
