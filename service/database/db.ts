@@ -4,6 +4,8 @@ import { MailgunMessage } from "@/types/mailgun"
 import { safeStringify } from "../../lib/core/common"
 import { PrismaClient } from "../../lib/generated"
 import logger from "../../lib/core/logger"
+import { SendMessageCommand } from "@aws-sdk/client-sqs"
+import { QUEUE_URL, sqsClient } from "../aws/awsHelper"
 
 export const prisma = new PrismaClient()
 
@@ -54,7 +56,6 @@ export async function createNewsletterErrorEntry(
 
 export async function saveNewsletterNotification(event: NotificationEvent) {
     const log = logger.child({ service: "saveNewsletterNotification" })
-    log.debug({ messageId: event.messageId, notificationId: event.notificationId }, "saving newsletter notification")
     try {
         return await prisma.newsletterNotifications.create({
             data: {
@@ -69,6 +70,21 @@ export async function saveNewsletterNotification(event: NotificationEvent) {
         log.error({ error: e, messageId: event.messageId, notificationId: event.notificationId }, "failed saving newsletter notification")
         if (e?.code === "P2003") {
             log.error({ code: e.code, meta: e?.meta }, "foreign key constraint violated when saving newsletter notification")
+            try {
+                const params = {
+                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                    MessageBody: String(event.raw),
+                    DelaySeconds: 30,
+                    MessageAttributes: {
+                        notificationId: { DataType: "String", StringValue: event.notificationId },
+                        messageId: { DataType: "String", StringValue: event.messageId },
+                    },
+                }
+                await sqsClient().send(new SendMessageCommand(params))
+                log.info({ notificationId: event.notificationId, messageId: event.messageId }, "re-enqueued newsletter notification after FK error")
+            } catch (sqse) {
+                log.error({ error: sqse, notificationId: event.notificationId, messageId: event.messageId }, "failed to re-enqueue newsletter notification")
+            }
         }
         throw e
     }
@@ -83,7 +99,7 @@ export async function getNewsletterContent(id: string) {
 }
 
 export async function saveSystemEmailEvent(event: NotificationEvent) {
-    return prisma.newsletterNotifications.create({
+    return prisma.systemMailNotifications.create({
         data: {
             messageId: event.messageId,
             rawEvent: event.raw,
