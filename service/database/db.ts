@@ -3,6 +3,7 @@ import { NotificationEvent } from "../../lib/core/aws-utils"
 import { MailgunMessage } from "@/types/mailgun"
 import { safeStringify } from "../../lib/core/common"
 import { PrismaClient } from "../../lib/generated"
+import logger from "../../lib/core/logger"
 
 export const prisma = new PrismaClient()
 
@@ -51,16 +52,26 @@ export async function createNewsletterErrorEntry(
     })
 }
 
-export function saveNewsletterNotification(event: NotificationEvent) {
-    return prisma.newsletterNotifications.create({
-        data: {
-            messageId: event.messageId,
-            rawEvent: event.raw,
-            type: event.type,
-            notificationId: event.notificationId,
-            timestamp: event.timestamp,
-        },
-    })
+export async function saveNewsletterNotification(event: NotificationEvent) {
+    const log = logger.child({ service: "saveNewsletterNotification" })
+    log.debug({ messageId: event.messageId, notificationId: event.notificationId }, "saving newsletter notification")
+    try {
+        return await prisma.newsletterNotifications.create({
+            data: {
+                messageId: event.messageId,
+                rawEvent: event.raw,
+                type: event.type,
+                notificationId: event.notificationId,
+                timestamp: event.timestamp,
+            },
+        })
+    } catch (e: any) {
+        log.error({ error: e, messageId: event.messageId, notificationId: event.notificationId }, "failed saving newsletter notification")
+        if (e?.code === "P2003") {
+            log.error({ code: e.code, meta: e?.meta }, "foreign key constraint violated when saving newsletter notification")
+        }
+        throw e
+    }
 }
 
 export async function getNewsletterContent(id: string) {
