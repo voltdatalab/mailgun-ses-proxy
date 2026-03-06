@@ -44,7 +44,7 @@ export async function getEmailEvents(params: EventsProps) {
 
 export function validateQueryParams(searchParams: URLSearchParams): QueryParams {
     const exception = (missingParam: string) => {
-        throw `Missing query param (${missingParam})`
+        throw new Error(`Missing query param (${missingParam})`)
     }
 
     const event = searchParams.get("event") || exception("event")
@@ -87,14 +87,14 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
             try {
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
                 await saveNewsletterNotification(result)
+                const command = new DeleteMessageCommand({
+                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                    ReceiptHandle: msg.ReceiptHandle,
+                })
+                await sqsClient().send(command)
             } catch (e) {
-                log.error(e)
+                log.error({ error: e, messageId: msg.MessageId }, "failed to process newsletter email event")
             }
-            const command = new DeleteMessageCommand({
-                QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
-                ReceiptHandle: msg.ReceiptHandle,
-            })
-            await sqsClient().send(command)
         }
     }
 }

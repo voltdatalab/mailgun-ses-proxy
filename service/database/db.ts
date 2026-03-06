@@ -1,4 +1,3 @@
-import { SendEmailRequest } from "@aws-sdk/client-sesv2"
 import { NotificationEvent } from "../../lib/core/aws-utils"
 import { MailgunMessage } from "@/types/mailgun"
 import { safeStringify } from "../../lib/core/common"
@@ -24,12 +23,12 @@ export async function createNewsletterBatchEntry(siteId: string, message: Mailgu
     })
 }
 
-export async function createNewsletterEntry(messageId: string, batchId: string, payload: SendEmailRequest) {
-    const toEmail = payload.Destination?.ToAddresses?.join("") || ""
+export async function createNewsletterEntry(messageId: string, batchId: string, toEmail: string, recipientData: string) {
     return prisma.newsletterMessages.create({
         data: {
             newsletterBatchId: batchId,
-            formatedContents: safeStringify(payload),
+            formatedContents: "",
+            recipientData,
             toEmail,
             messageId,
         },
@@ -40,16 +39,17 @@ export async function createNewsletterErrorEntry(
     messageId: string,
     errorMessage: string,
     batchId: string,
-    payload: SendEmailRequest
+    toEmail: string,
+    recipientData: string
 ) {
-    const toEmail = payload.Destination?.ToAddresses?.join("") || ""
     return prisma.newsletterErrors.create({
         data: {
             error: errorMessage,
             newsletterBatchId: batchId,
             messageId: messageId,
-            formatedContents: safeStringify(payload),
-            toEmail
+            formatedContents: "",
+            recipientData,
+            toEmail,
         },
     })
 }

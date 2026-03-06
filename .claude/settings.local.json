@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vitest:*)",
+      "Bash(npm test:*)",
+      "Bash(ls:*)",
+      "Bash(find C:\\\\src\\\\mailgun-ses-proxy-volt -name \"*.ts\" -o -name \"*.tsx\" | xargs grep -l \"findMany.*Newsletter\\\\|select.*formated\" 2>/dev/null)",
+      "Bash(grep:*)",
+      "Bash(cd /c/src/mailgun-ses-proxy-volt && npx prisma generate 2>&1)",
+      "Bash(cd /c/src/mailgun-ses-proxy-volt && npx tsc --noEmit 2>&1)",
+      "Bash(cd /c/src/mailgun-ses-proxy-volt && npx prisma migrate dev --name add_recipient_data --create-only 2>&1)"
+    ]
+  }
+}

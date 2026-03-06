@@ -2,7 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from "http"
 import { parse } from "url"
 import next from "next"
 import logger from "./lib/core/logger"
-import { processNewsletterEventsQueue, processNewsletterQueue } from "./service/background-process"
+import { processNewsletterEventsQueue, processNewsletterQueue, processSystemEventsQueue } from "./service/background-process"
 
 const port = parseInt(process.env.PORT || "3000")
 const dev = process.env.NODE_ENV !== "production"
@@ -22,5 +22,6 @@ app.prepare().then(() => {
     // process the SES queues for emails and events
     processNewsletterQueue().then(()=> process.exit(1))
     processNewsletterEventsQueue().then(()=> process.exit(1))
+    processSystemEventsQueue().then(()=> process.exit(1))
     
 }).catch((e)=>{logger.error(e, "stopping the server."); process.exit(1)})
