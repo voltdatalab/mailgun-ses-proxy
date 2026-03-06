@@ -54,40 +54,57 @@ export async function createNewsletterErrorEntry(
     })
 }
 
-export async function saveNewsletterNotification(event: NotificationEvent) {
+const MAX_NOTIFICATION_RETRIES = 5
+
+export async function saveNewsletterNotification(event: NotificationEvent, retryCount = 0) {
     const log = logger.child({ service: "saveNewsletterNotification" })
-    try {
-        return await prisma.newsletterNotifications.create({
-            data: {
-                messageId: event.messageId,
-                rawEvent: event.raw,
-                type: event.type,
-                notificationId: event.notificationId,
-                timestamp: event.timestamp,
-            },
-        })
-    } catch (e: any) {
-        log.error({ error: e, messageId: event.messageId, notificationId: event.notificationId }, "failed saving newsletter notification")
-        if (e?.code === "P2003") {
-            log.error({ code: e.code, meta: e?.meta }, "foreign key constraint violated when saving newsletter notification")
-            try {
-                const params = {
-                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
-                    MessageBody: String(event.raw),
-                    DelaySeconds: 30,
-                    MessageAttributes: {
-                        notificationId: { DataType: "String", StringValue: event.notificationId },
-                        messageId: { DataType: "String", StringValue: event.messageId },
-                    },
-                }
-                await sqsClient().send(new SendMessageCommand(params))
-                log.info({ notificationId: event.notificationId, messageId: event.messageId }, "re-enqueued newsletter notification after FK error")
-            } catch (sqse) {
-                log.error({ error: sqse, notificationId: event.notificationId, messageId: event.messageId }, "failed to re-enqueue newsletter notification")
-            }
+
+    // Check if the parent message exists before attempting to insert
+    const parentMessage = await prisma.newsletterMessages.findUnique({
+        where: { messageId: event.messageId },
+        select: { messageId: true },
+    })
+
+    if (!parentMessage) {
+        if (retryCount >= MAX_NOTIFICATION_RETRIES) {
+            log.warn(
+                { messageId: event.messageId, notificationId: event.notificationId, retryCount },
+                "dropping newsletter notification: parent message not found after max retries"
+            )
+            return { dropped: true }
         }
-        throw e
+
+        log.warn(
+            { messageId: event.messageId, notificationId: event.notificationId, retryCount },
+            "parent message not found, re-enqueuing notification"
+        )
+        try {
+            const params = {
+                QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                MessageBody: String(event.raw),
+                DelaySeconds: 30,
+                MessageAttributes: {
+                    notificationId: { DataType: "String", StringValue: event.notificationId },
+                    messageId: { DataType: "String", StringValue: event.messageId },
+                    retryCount: { DataType: "Number", StringValue: String(retryCount + 1) },
+                },
+            }
+            await sqsClient().send(new SendMessageCommand(params))
+        } catch (sqse) {
+            log.error({ error: sqse, notificationId: event.notificationId, messageId: event.messageId }, "failed to re-enqueue newsletter notification")
+        }
+        return { requeued: true }
     }
+
+    return prisma.newsletterNotifications.create({
+        data: {
+            messageId: event.messageId,
+            rawEvent: event.raw,
+            type: event.type,
+            notificationId: event.notificationId,
+            timestamp: event.timestamp,
+        },
+    })
 }
 
 export async function getNewsletterContent(id: string) {

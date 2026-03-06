@@ -85,15 +85,21 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
     for (const msg of response.Messages) {
         if (msg.Body && msg.MessageId) {
             try {
+                const retryCount = parseInt(msg.MessageAttributes?.["retryCount"]?.StringValue || "0")
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
-                await saveNewsletterNotification(result)
-                const command = new DeleteMessageCommand({
-                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
-                    ReceiptHandle: msg.ReceiptHandle,
-                })
-                await sqsClient().send(command)
+                await saveNewsletterNotification(result, retryCount)
             } catch (e) {
                 log.error({ error: e, messageId: msg.MessageId }, "failed to process newsletter email event")
+            }
+            // Always delete the original message from the queue.
+            // If a retry is needed, saveNewsletterNotification already re-enqueued a new message.
+            try {
+                await sqsClient().send(new DeleteMessageCommand({
+                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                    ReceiptHandle: msg.ReceiptHandle,
+                }))
+            } catch (e) {
+                log.error({ error: e, messageId: msg.MessageId }, "failed to delete message from queue")
             }
         }
     }
