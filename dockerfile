@@ -36,7 +36,7 @@ RUN npm install --omit=dev
 COPY --chown=node:node --from=builder /home/node/app/.next ./.next
 COPY --chown=node:node --from=builder /home/node/app/dist ./dist
 COPY --chown=node:node --from=builder /home/node/app/prisma ./prisma
-COPY --chown=node:node --from=builder /home/node/app/lib/generated ./lib/generated
+COPY --chown=node:node --from=builder /home/node/app/lib ./lib
 COPY --chown=node:node --from=builder /home/node/app/next.config.ts ./next.config.ts
 
 # Re-generate Prisma client for production (correct binary for alpine)
