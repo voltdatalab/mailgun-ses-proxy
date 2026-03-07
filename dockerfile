@@ -1,7 +1,6 @@
 ARG NODE_VERSION=20
 
-# ---- Build stage ----
-FROM node:${NODE_VERSION}-alpine AS builder
+FROM node:${NODE_VERSION}-alpine
 
 RUN mkdir -p /home/node/app/node_modules && chown -R node:node /home/node/app
 
@@ -10,39 +9,22 @@ COPY --chown=node:node package*.json ./
 
 USER node
 
-# Install ALL dependencies (including devDependencies) for the build
+# Install all dependencies for build (NODE_ENV not set yet)
 RUN npm install
 
-# Copy source and build
+# Copy the rest of the source files into the image.
 COPY --chown=node:node . .
+
+# Build code
 RUN npm run build
 
-# ---- Production stage ----
-FROM node:${NODE_VERSION}-alpine
+# Remove devDependencies after build
+RUN npm prune --omit=dev
 
 ENV NODE_ENV=production
 
-RUN mkdir -p /home/node/app/node_modules && chown -R node:node /home/node/app
-
-WORKDIR /home/node/app
-
-USER node
-
-# Copy package files and install production-only dependencies
-COPY --chown=node:node --from=builder /home/node/app/package*.json ./
-RUN npm install --omit=dev
-
-# Copy build artifacts
-COPY --chown=node:node --from=builder /home/node/app/.next ./.next
-COPY --chown=node:node --from=builder /home/node/app/dist ./dist
-COPY --chown=node:node --from=builder /home/node/app/prisma ./prisma
-COPY --chown=node:node --from=builder /home/node/app/lib ./lib
-COPY --chown=node:node --from=builder /home/node/app/app ./app
-COPY --chown=node:node --from=builder /home/node/app/next.config.ts ./next.config.ts
-
-# Re-generate Prisma client for production (correct binary for alpine)
-RUN npx prisma generate
-
+# Expose the port that the application listens on.
 EXPOSE 8080
 
+# Run the application.
 CMD ["npm","run","start"]

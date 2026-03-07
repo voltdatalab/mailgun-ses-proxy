@@ -14,7 +14,9 @@
       "Bash(cd /c/src/mailgun-ses-proxy-volt && npm install 2>&1)",
       "Bash(cd /c/src/mailgun-ses-proxy-volt && npm audit 2>&1)",
       "Bash(cd /c/src/mailgun-ses-proxy-volt && npm audit fix 2>&1)",
-      "Bash(cd /c/src/mailgun-ses-proxy-volt && npx prisma generate 2>&1 && npx tsc --noEmit 2>&1)"
+      "Bash(cd /c/src/mailgun-ses-proxy-volt && npx prisma generate 2>&1 && npx tsc --noEmit 2>&1)",
+      "Bash(cd:*)",
+      "Bash(tail:*)"
     ]
   }
 }
