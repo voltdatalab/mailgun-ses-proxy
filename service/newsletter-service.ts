@@ -48,11 +48,11 @@ async function sendSingleMail(prepared: PreparedEmail, dbId: string, siteId: str
     } catch (e) {
         // SES failed (timeout, throttle, etc.) - generate temp messageId for error logging
         const tempMessageId = randomUUID()
-        log.error({ error: e, tempMessageId, siteId }, "SES send failed, recording error entry")
+        log.error({ err: e, tempMessageId, siteId }, "SES send failed, recording error entry")
         try {
             await createNewsletterErrorEntry(tempMessageId, String(e), batchId, toEmail, recipientData)
         } catch (dbError) {
-            log.error({ dbError, tempMessageId, siteId }, "failed to record error entry in database")
+            log.error({ err: dbError, tempMessageId, siteId }, "failed to record error entry in database")
         }
         return { errorMessage: e }
     }
@@ -120,6 +120,6 @@ export async function validateAndSend(message: Message) {
             )
         }
     } catch (e) {
-        log.error({ error: e, batchId: message.Body }, "error occurred at validateAndSend")
+        log.error({ err: e, batchId: message.Body }, "error occurred at validateAndSend")
     }
 }

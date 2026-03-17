@@ -153,7 +153,7 @@ export async function saveNewsletterNotification(
             }
             await sqsClient().send(new SendMessageCommand(params))
         } catch (sqse) {
-            log.error({ error: sqse, notificationId: event.notificationId, messageId: event.messageId }, "failed to re-enqueue newsletter notification")
+            log.error({ err: sqse, notificationId: event.notificationId, messageId: event.messageId }, "failed to re-enqueue newsletter notification")
         }
         return { requeued: true }
     }

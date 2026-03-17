@@ -92,7 +92,7 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
                 await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
             } catch (e) {
-                log.error({ error: e, messageId: msg.MessageId }, "failed to process newsletter email event")
+                log.error({ err: e, messageId: msg.MessageId }, "failed to process newsletter email event")
             }
             // Always delete the original message from the queue.
             // If a retry is needed, saveNewsletterNotification already re-enqueued a new message.
@@ -102,7 +102,7 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
                     ReceiptHandle: msg.ReceiptHandle,
                 }))
             } catch (e) {
-                log.error({ error: e, messageId: msg.MessageId }, "failed to delete message from queue")
+                log.error({ err: e, messageId: msg.MessageId }, "failed to delete message from queue")
             }
         }
     }

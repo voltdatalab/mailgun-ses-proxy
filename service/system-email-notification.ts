@@ -19,7 +19,7 @@ export async function processSystemEmailEvents(response: ReceiveMessageCommandOu
                 })
                 await sqsClient().send(command)
             } catch (e) {
-                log.error({ error: e, messageId: msg.MessageId }, "failed to process system email event")
+                log.error({ err: e, messageId: msg.MessageId }, "failed to process system email event")
             }
         }
     }
