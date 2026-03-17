@@ -54,10 +54,43 @@ export async function createNewsletterErrorEntry(
     })
 }
 
-const MAX_NOTIFICATION_RETRIES = 5
+function getEnvNumber(name: string, fallback: number) {
+    const raw = process.env[name]
+    if (!raw) return fallback
 
-export async function saveNewsletterNotification(event: NotificationEvent, retryCount = 0) {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function getEnvBoolean(name: string, fallback = false) {
+    const raw = process.env[name]
+    if (!raw) return fallback
+    return ["1", "true", "yes", "on"].includes(raw.toLowerCase())
+}
+
+const MAX_NOTIFICATION_RETRIES = getEnvNumber("NEWSLETTER_NOTIFICATION_MAX_RETRIES", 5)
+const NOTIFICATION_REQUEUE_DELAY_SECONDS = getEnvNumber("NEWSLETTER_NOTIFICATION_REQUEUE_DELAY_SECONDS", 30)
+const DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS = getEnvBoolean("DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS", false)
+const NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS = getEnvNumber("NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS", 0)
+
+interface NewsletterNotificationContext {
+    sqsSentTimestamp?: number
+}
+
+export async function saveNewsletterNotification(
+    event: NotificationEvent,
+    retryCount = 0,
+    context: NewsletterNotificationContext = {}
+) {
     const log = logger.child({ service: "saveNewsletterNotification" })
+    const eventAgeSeconds = Math.max(0, Math.floor((Date.now() - event.timestamp.getTime()) / 1000))
+    const queueAgeSeconds = context.sqsSentTimestamp
+        ? Math.max(0, Math.floor((Date.now() - context.sqsSentTimestamp) / 1000))
+        : null
+    const shouldDropByAge =
+        NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS > 0 &&
+        (eventAgeSeconds >= NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS ||
+            (queueAgeSeconds !== null && queueAgeSeconds >= NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS))
 
     // Check if the parent message exists before attempting to insert
     const parentMessage = await prisma.newsletterMessages.findUnique({
@@ -66,23 +99,52 @@ export async function saveNewsletterNotification(event: NotificationEvent, retry
     })
 
     if (!parentMessage) {
+        if (DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS) {
+            log.warn(
+                {
+                    messageId: event.messageId,
+                    notificationId: event.notificationId,
+                    retryCount,
+                    eventAgeSeconds,
+                    queueAgeSeconds,
+                },
+                "dropping newsletter notification: parent message not found and orphan dropping is enabled"
+            )
+            return { dropped: true }
+        }
+
+        if (shouldDropByAge) {
+            log.warn(
+                {
+                    messageId: event.messageId,
+                    notificationId: event.notificationId,
+                    retryCount,
+                    eventAgeSeconds,
+                    queueAgeSeconds,
+                    maxAgeSeconds: NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS,
+                },
+                "dropping newsletter notification: parent message not found and notification is older than max age"
+            )
+            return { dropped: true }
+        }
+
         if (retryCount >= MAX_NOTIFICATION_RETRIES) {
             log.warn(
-                { messageId: event.messageId, notificationId: event.notificationId, retryCount },
+                { messageId: event.messageId, notificationId: event.notificationId, retryCount, eventAgeSeconds, queueAgeSeconds },
                 "dropping newsletter notification: parent message not found after max retries"
             )
             return { dropped: true }
         }
 
         log.warn(
-            { messageId: event.messageId, notificationId: event.notificationId, retryCount },
+            { messageId: event.messageId, notificationId: event.notificationId, retryCount, eventAgeSeconds, queueAgeSeconds },
             "parent message not found, re-enqueuing notification"
         )
         try {
             const params = {
                 QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
                 MessageBody: String(event.raw),
-                DelaySeconds: 30,
+                DelaySeconds: NOTIFICATION_REQUEUE_DELAY_SECONDS,
                 MessageAttributes: {
                     notificationId: { DataType: "String", StringValue: event.notificationId },
                     messageId: { DataType: "String", StringValue: event.messageId },

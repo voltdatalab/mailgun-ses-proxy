@@ -86,8 +86,11 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
         if (msg.Body && msg.MessageId) {
             try {
                 const retryCount = parseInt(msg.MessageAttributes?.["retryCount"]?.StringValue || "0")
+                const sqsSentTimestamp = msg.Attributes?.SentTimestamp
+                    ? parseInt(msg.Attributes.SentTimestamp)
+                    : undefined
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
-                await saveNewsletterNotification(result, retryCount)
+                await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
             } catch (e) {
                 log.error({ error: e, messageId: msg.MessageId }, "failed to process newsletter email event")
             }
