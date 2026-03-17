@@ -89,8 +89,37 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
                 const sqsSentTimestamp = msg.Attributes?.SentTimestamp
                     ? parseInt(msg.Attributes.SentTimestamp)
                     : undefined
+                const rawEvent = JSON.parse(msg.Body) as {
+                    eventType?: string
+                    mail?: { messageId?: string, timestamp?: string }
+                }
+                log.info(
+                    {
+                        sqsMessageId: msg.MessageId,
+                        retryCount,
+                        eventType: rawEvent.eventType,
+                        sesMessageId: rawEvent.mail?.messageId,
+                        sqsSentTimestamp,
+                    },
+                    "received newsletter notification event"
+                )
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
-                await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
+                const saveResult = await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
+                log.info(
+                    {
+                        sqsMessageId: msg.MessageId,
+                        eventType: rawEvent.eventType,
+                        parsedType: result.type,
+                        notificationId: result.notificationId,
+                        messageId: result.messageId,
+                        outcome: saveResult && "requeued" in saveResult
+                            ? "requeued"
+                            : saveResult && "dropped" in saveResult
+                                ? "dropped"
+                                : "saved",
+                    },
+                    "newsletter notification processed"
+                )
             } catch (e) {
                 log.error({ err: e, messageId: msg.MessageId }, "failed to process newsletter email event")
             }
