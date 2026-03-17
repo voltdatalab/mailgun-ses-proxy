@@ -93,7 +93,7 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
                     eventType?: string
                     mail?: { messageId?: string, timestamp?: string }
                 }
-                log.info(
+                log.debug(
                     {
                         sqsMessageId: msg.MessageId,
                         retryCount,
@@ -105,7 +105,7 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
                 )
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
                 const saveResult = await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
-                log.info(
+                log.debug(
                     {
                         sqsMessageId: msg.MessageId,
                         eventType: rawEvent.eventType,

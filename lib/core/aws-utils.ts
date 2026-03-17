@@ -94,17 +94,28 @@ export interface NotificationEvent {
     raw: any
 }
 
+function normalizeEventTimestamp(value: string | Date | undefined, fallback = new Date()) {
+    if (!value) return fallback
+    if (value instanceof Date) return value
+
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? fallback : parsed
+}
+
 export function parseNotificationEvent(messageId: string, inputEvent: string): NotificationEvent {
     const event = JSON.parse(inputEvent) as {
         eventType: keyof typeof awsToMailgunType
-        mail: { messageId: string, timestamp: Date }
-        open?: { timestamp: Date }
+        mail: { messageId: string, timestamp?: string | Date }
+        open?: { timestamp?: string | Date }
     }
     return {
         notificationId: messageId,
         type: String(awsToMailgunType[event.eventType]).toLocaleLowerCase(),
         messageId: event.mail.messageId.replace(/^<|>$/g, '').split('@')[0],
-        timestamp: event.open?.timestamp || new Date(),
+        timestamp: normalizeEventTimestamp(
+            event.open?.timestamp || event.mail.timestamp,
+            new Date()
+        ),
         raw: inputEvent,
     }
 }
