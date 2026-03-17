@@ -103,7 +103,7 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
     return {
         notificationId: messageId,
         type: String(awsToMailgunType[event.eventType]).toLocaleLowerCase(),
-        messageId: event.mail.messageId,
+        messageId: event.mail.messageId.replace(/^<|>$/g, '').split('@')[0],
         timestamp: event.open?.timestamp || new Date(),
         raw: inputEvent,
     }
