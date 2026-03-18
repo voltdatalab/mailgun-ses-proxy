@@ -44,7 +44,7 @@ export async function getEmailEvents(params: EventsProps) {
 
 export function validateQueryParams(searchParams: URLSearchParams): QueryParams {
     const exception = (missingParam: string) => {
-        throw `Missing query param (${missingParam})`
+        throw new Error(`Missing query param (${missingParam})`)
     }
 
     const event = searchParams.get("event") || exception("event")
@@ -85,16 +85,54 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
     for (const msg of response.Messages) {
         if (msg.Body && msg.MessageId) {
             try {
+                const retryCount = parseInt(msg.MessageAttributes?.["retryCount"]?.StringValue || "0")
+                const sqsSentTimestamp = msg.Attributes?.SentTimestamp
+                    ? parseInt(msg.Attributes.SentTimestamp)
+                    : undefined
+                const rawEvent = JSON.parse(msg.Body) as {
+                    eventType?: string
+                    mail?: { messageId?: string, timestamp?: string }
+                }
+                log.debug(
+                    {
+                        sqsMessageId: msg.MessageId,
+                        retryCount,
+                        eventType: rawEvent.eventType,
+                        sesMessageId: rawEvent.mail?.messageId,
+                        sqsSentTimestamp,
+                    },
+                    "received newsletter notification event"
+                )
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
-                await saveNewsletterNotification(result)
+                const saveResult = await saveNewsletterNotification(result, retryCount, { sqsSentTimestamp })
+                log.debug(
+                    {
+                        sqsMessageId: msg.MessageId,
+                        eventType: rawEvent.eventType,
+                        parsedType: result.type,
+                        notificationId: result.notificationId,
+                        messageId: result.messageId,
+                        outcome: saveResult && "requeued" in saveResult
+                            ? "requeued"
+                            : saveResult && "dropped" in saveResult
+                                ? "dropped"
+                                : "saved",
+                    },
+                    "newsletter notification processed"
+                )
             } catch (e) {
-                log.error(e)
+                log.error({ err: e, messageId: msg.MessageId }, "failed to process newsletter email event")
             }
-            const command = new DeleteMessageCommand({
-                QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
-                ReceiptHandle: msg.ReceiptHandle,
-            })
-            await sqsClient().send(command)
+            // Always delete the original message from the queue.
+            // If a retry is needed, saveNewsletterNotification already re-enqueued a new message.
+            try {
+                await sqsClient().send(new DeleteMessageCommand({
+                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                    ReceiptHandle: msg.ReceiptHandle,
+                }))
+            } catch (e) {
+                log.error({ err: e, messageId: msg.MessageId }, "failed to delete message from queue")
+            }
         }
     }
 }

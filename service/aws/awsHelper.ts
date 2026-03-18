@@ -9,21 +9,33 @@ export const QUEUE_URL = {
 
 const regions = (process.env.SES_REGION || "").split(",").map(s => s.trim())
 
+const newsletterClients = new Map<string, SESv2Client>()
+
 export function sesNewsletterClient() {
-    if (!process.env.SES_REGION) throw "env variable SES_REGION not found"
+    if (!process.env.SES_REGION) throw new Error("env variable SES_REGION not found")
     const region = regions[Math.floor(Math.random() * regions.length)];
-    const client = new SESv2Client({ region })
-    return client
+    if (!newsletterClients.has(region)) {
+        newsletterClients.set(region, new SESv2Client({ region }))
+    }
+    return newsletterClients.get(region)!
 }
+
+let _sesSystemClient: SESv2Client | null = null
 
 export const sesSystemClient = () => {
+    if (_sesSystemClient) return _sesSystemClient
     const region = process.env.SES_TRANSACTIONAL_REGION || regions[0]
-    if (!region) throw "env SES_TRANSACTIONAL_REGION is not defined" 
-    return new SESv2Client({ region })
+    if (!region) throw new Error("env SES_TRANSACTIONAL_REGION is not defined")
+    _sesSystemClient = new SESv2Client({ region })
+    return _sesSystemClient
 }
 
+let _sqsClient: SQSClient | null = null
+
 export const sqsClient = () => {
+    if (_sqsClient) return _sqsClient
     const region = process.env.SQS_REGION
-    if (!region) throw "env SQS_REGION is not defined"
-    return new SQSClient({ region })
+    if (!region) throw new Error("env SQS_REGION is not defined")
+    _sqsClient = new SQSClient({ region })
+    return _sqsClient
 }

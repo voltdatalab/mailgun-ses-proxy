@@ -8,7 +8,7 @@ const log = logger.child({ service: "service:transactional-email-service" })
 
 function formatEmail(email: EmailPayload) {
     if (!process.env.TRANSACTIONAL_CONFIGURATION_SET_NAME)
-        throw "env variable TRANSACTIONAL_CONFIGURATION_SET_NAME is not defined"
+        throw new Error("env variable TRANSACTIONAL_CONFIGURATION_SET_NAME is not defined")
     return {
         ConfigurationSetName: process.env.TRANSACTIONAL_CONFIGURATION_SET_NAME,
         FromEmailAddress: email.from,

@@ -20,6 +20,8 @@ model NewsletterBatch {
   created             DateTime             @default(now())
   NewslettersMessages NewsletterMessages[]
   NewslettersErrors   NewsletterErrors[]
+
+  @@index([siteId])
 }
 
 model NewsletterMessages {
@@ -29,8 +31,11 @@ model NewsletterMessages {
   newsletterBatchId  String
   created            DateTime                  @default(now())
   formatedContents   String                    @db.LongText
+  recipientData      String?                   @db.Text
   notificationEvents NewsletterNotifications[]
   newsletterBatch    NewsletterBatch           @relation(fields: [newsletterBatchId], references: [id])
+
+  @@index([newsletterBatchId])
 }
 
 model NewsletterErrors {
@@ -41,6 +46,7 @@ model NewsletterErrors {
   newsletterBatchId String
   messageId         String          @unique
   formatedContents  String          @db.LongText
+  recipientData     String?         @db.Text
   newsletterBatch   NewsletterBatch @relation(fields: [newsletterBatchId], references: [id])
 }
 
@@ -53,6 +59,9 @@ model NewsletterNotifications {
   timestamp      DateTime
   created        DateTime           @default(now())
   newsletter     NewsletterMessages @relation(fields: [messageId], references: [messageId])
+
+  @@index([type, created])
+  @@index([messageId])
 }
 
 model SystemMailNotifications {

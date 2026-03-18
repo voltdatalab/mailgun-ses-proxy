@@ -260,6 +260,9 @@ Monitor email delivery through the database tables:
     - Check SQS queue visibility timeout settings
     - Verify AWS credentials and permissions
     - Monitor dead letter queues for failed messages
+    - If the database was reset while old SES notifications were still in SQS, `parent message not found` logs can continue until that backlog is purged or retried out
+    - In that recovery scenario, purge the newsletter notification queue or temporarily enable `DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS=true`
+    - You can also tune `NEWSLETTER_NOTIFICATION_MAX_RETRIES`, `NEWSLETTER_NOTIFICATION_REQUEUE_DELAY_SECONDS`, and `NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS`
 
 3. **Database Connection**
 
