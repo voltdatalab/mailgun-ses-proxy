@@ -2,7 +2,13 @@ import { preparePayload, PreparedEmail } from "../lib/core/aws-utils"
 import { safeStringify } from "../lib/core/common"
 import { SendEmailCommand } from "@aws-sdk/client-sesv2"
 import { DeleteMessageCommand, Message, SendMessageCommand } from "@aws-sdk/client-sqs"
-import { createNewsletterBatchEntry, createNewsletterEntry, createNewsletterErrorEntry, getNewsletterContent } from "./database/db"
+import {
+    createNewsletterBatchEntry,
+    createNewsletterEntry,
+    createNewsletterErrorEntry,
+    getNewsletterContent,
+    shouldPersistNewsletterFormattedContents,
+} from "./database/db"
 import { QUEUE_URL, sesNewsletterClient, sqsClient } from "./aws/awsHelper"
 import logger from "../lib/core/logger"
 import { createQueue } from "./utils/queue"
@@ -10,6 +16,7 @@ import { createQueue } from "./utils/queue"
 import { randomUUID } from "node:crypto"
 
 const log = logger.child({ service: "service:newsletter-service" })
+const PERSIST_NEWSLETTER_FORMATTED_CONTENTS = shouldPersistNewsletterFormattedContents()
 
 export async function addNewsletterToQueue(message: any, siteId: string, auth: any) {
     if (!message) throw new Error("Message body is empty or invalid.")
@@ -39,18 +46,19 @@ async function sendSingleMail(prepared: PreparedEmail, dbId: string, siteId: str
     const { request, recipientVariables } = prepared
     const toEmail = request.Destination?.ToAddresses?.join("") || ""
     const recipientData = JSON.stringify({ toEmail, variables: recipientVariables })
+    const formatedContents = PERSIST_NEWSLETTER_FORMATTED_CONTENTS ? safeStringify(request) : ""
     try {
         const cmd = new SendEmailCommand(request)
         const resp = await sesNewsletterClient().send(cmd)
         const messageId = resp.MessageId as string
-        await createNewsletterEntry(messageId, dbId, toEmail, recipientData)
+        await createNewsletterEntry(messageId, dbId, toEmail, recipientData, formatedContents)
         log.info({ messageId, siteId }, "email sent")
     } catch (e) {
         // SES failed (timeout, throttle, etc.) - generate temp messageId for error logging
         const tempMessageId = randomUUID()
         log.error({ err: e, tempMessageId, siteId }, "SES send failed, recording error entry")
         try {
-            await createNewsletterErrorEntry(tempMessageId, String(e), batchId, toEmail, recipientData)
+            await createNewsletterErrorEntry(tempMessageId, String(e), batchId, toEmail, recipientData, formatedContents)
         } catch (dbError) {
             log.error({ err: dbError, tempMessageId, siteId }, "failed to record error entry in database")
         }

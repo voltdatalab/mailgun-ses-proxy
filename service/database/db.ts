@@ -8,6 +8,22 @@ import { QUEUE_URL, sqsClient } from "../aws/awsHelper"
 
 export const prisma = new PrismaClient()
 
+function getEnvNumber(name: string, fallback: number) {
+    const raw = process.env[name]
+    if (!raw) return fallback
+
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function getEnvBoolean(name: string, fallback = false) {
+    const raw = process.env[name]
+    if (!raw) return fallback
+    return ["1", "true", "yes", "on"].includes(raw.toLowerCase())
+}
+
+const PERSIST_NEWSLETTER_FORMATTED_CONTENTS = getEnvBoolean("PERSIST_NEWSLETTER_FORMATTED_CONTENTS", false)
+
 export async function createNewsletterBatchEntry(siteId: string, message: MailgunMessage) {
     const batchId = message["v:email-id"]
     const contents = safeStringify(message)
@@ -23,11 +39,17 @@ export async function createNewsletterBatchEntry(siteId: string, message: Mailgu
     })
 }
 
-export async function createNewsletterEntry(messageId: string, batchId: string, toEmail: string, recipientData: string) {
+export async function createNewsletterEntry(
+    messageId: string,
+    batchId: string,
+    toEmail: string,
+    recipientData: string,
+    formatedContents = ""
+) {
     return prisma.newsletterMessages.create({
         data: {
             newsletterBatchId: batchId,
-            formatedContents: "",
+            formatedContents,
             recipientData,
             toEmail,
             messageId,
@@ -40,38 +62,29 @@ export async function createNewsletterErrorEntry(
     errorMessage: string,
     batchId: string,
     toEmail: string,
-    recipientData: string
+    recipientData: string,
+    formatedContents = ""
 ) {
     return prisma.newsletterErrors.create({
         data: {
             error: errorMessage,
             newsletterBatchId: batchId,
             messageId: messageId,
-            formatedContents: "",
+            formatedContents,
             recipientData,
             toEmail,
         },
     })
 }
 
-function getEnvNumber(name: string, fallback: number) {
-    const raw = process.env[name]
-    if (!raw) return fallback
-
-    const parsed = Number(raw)
-    return Number.isFinite(parsed) ? parsed : fallback
-}
-
-function getEnvBoolean(name: string, fallback = false) {
-    const raw = process.env[name]
-    if (!raw) return fallback
-    return ["1", "true", "yes", "on"].includes(raw.toLowerCase())
-}
-
 const MAX_NOTIFICATION_RETRIES = getEnvNumber("NEWSLETTER_NOTIFICATION_MAX_RETRIES", 5)
 const NOTIFICATION_REQUEUE_DELAY_SECONDS = getEnvNumber("NEWSLETTER_NOTIFICATION_REQUEUE_DELAY_SECONDS", 30)
 const DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS = getEnvBoolean("DROP_ORPHAN_NEWSLETTER_NOTIFICATIONS", false)
 const NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS = getEnvNumber("NEWSLETTER_NOTIFICATION_MAX_AGE_SECONDS", 0)
+
+export function shouldPersistNewsletterFormattedContents() {
+    return PERSIST_NEWSLETTER_FORMATTED_CONTENTS
+}
 
 interface NewsletterNotificationContext {
     sqsSentTimestamp?: number
