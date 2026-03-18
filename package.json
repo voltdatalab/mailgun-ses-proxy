@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "nodemon",
-    "next:build": "next build",
-    "build": "prisma generate && next build && tsc --project tsconfig.server.json",
+    "next:build": "next build --webpack",
+    "docker:build": "docker build -t mailgun-to-ses-proxy .",
+    "build": "prisma generate && next build --webpack && tsc --project tsconfig.server.json",
     "start": "NODE_ENV=production prisma migrate deploy && node dist/server.js",
     "lint": "next lint",
     "db:migrate:dev": "prisma migrate dev",
@@ -21,12 +22,16 @@
     "@aws-sdk/client-sesv2": "^3.914.0",
     "@aws-sdk/client-sqs": "^3.914.0",
     "@prisma/client": "^6.18.0",
-    "next": "^16.0.0",
+    "bonsai": "^0.4.2",
+    "next": "^16.0.7",
     "pino": "^10.1.0",
     "prisma": "^6.18.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zod": "^4.1.12"
+  },
+  "overrides": {
+    "baseline-browser-mapping": "^2.10.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.16",

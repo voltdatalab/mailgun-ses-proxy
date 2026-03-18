@@ -1,3 +1,5 @@
+import logger from "../../lib/core/logger";
+
 export type ItemFn = () => Promise<any>;
 
 type ItemWrapperObj = {
@@ -31,6 +33,7 @@ type OnFinishListener = ({
 }) => void;
 
 export const createQueue = ({rateLimit = 25}: {rateLimit: number}) => {
+  const log = logger.child({ service: "queue" });
 
   let startTime: number | null = null;
   let min: StatsObj = {
@@ -75,7 +78,7 @@ export const createQueue = ({rateLimit = 25}: {rateLimit: number}) => {
         intervalHandle = null;
       }
       if (runningItems.length === 0) {
-        console.log('onFinish!');
+        log.debug('queue finished processing');
         onFinishListeners.forEach((fn) => {
           const totalDuration = performance.now() - (startTime || 0);
           fn({
@@ -93,20 +96,20 @@ export const createQueue = ({rateLimit = 25}: {rateLimit: number}) => {
       // console.log(`Parallelization is full (${runningItems.length}), skipping`);
       return;
     } else {
-      console.log('Adding to running items');
+      log.debug({ queuedItems: queuedItems.length, runningItems: runningItems.length }, 'adding item to running queue');
       const itemWrapper = queuedItems.shift() as ItemWrapperObj;
       runningItems.push(itemWrapper);
       const startItemTime = performance.now();
       itemWrapper
         .fn()
         .catch((reason) => {
-          console.log('Item', itemWrapper.id, 'failed', reason);
+          log.warn({ err: reason, itemId: itemWrapper.id }, 'queue item failed');
           failedItems.push(itemWrapper.id);
         })
         .finally(() => {
           const finishItemTime = performance.now();
           const timeTaken = finishItemTime - startItemTime;
-          console.log('Item', itemWrapper.id, 'took', timeTaken, 'ms');
+          log.debug({ itemId: itemWrapper.id, timeTaken }, 'queue item completed');
 
           if (timeTaken < min.time) {
             min = {

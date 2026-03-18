@@ -1,4 +1,6 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+build.log
+error.log
 
 # dependencies
 /node_modules
@@ -42,3 +44,5 @@ next-env.d.ts
 
 # nextjs build
 dist
+lib/generated
+/.claude

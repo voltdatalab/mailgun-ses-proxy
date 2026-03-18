@@ -1,8 +1,14 @@
-import { preparePayload } from "../lib/core/aws-utils"
+import { preparePayload, PreparedEmail } from "../lib/core/aws-utils"
 import { safeStringify } from "../lib/core/common"
-import { SendEmailCommand, SendEmailRequest } from "@aws-sdk/client-sesv2"
+import { SendEmailCommand } from "@aws-sdk/client-sesv2"
 import { DeleteMessageCommand, Message, SendMessageCommand } from "@aws-sdk/client-sqs"
-import { createNewsletterBatchEntry, createNewsletterEntry, createNewsletterErrorEntry, getNewsletterContent } from "./database/db"
+import {
+    createNewsletterBatchEntry,
+    createNewsletterEntry,
+    createNewsletterErrorEntry,
+    getNewsletterContent,
+    shouldPersistNewsletterFormattedContents,
+} from "./database/db"
 import { QUEUE_URL, sesNewsletterClient, sqsClient } from "./aws/awsHelper"
 import logger from "../lib/core/logger"
 import { createQueue } from "./utils/queue"
@@ -10,6 +16,7 @@ import { createQueue } from "./utils/queue"
 import { randomUUID } from "node:crypto"
 
 const log = logger.child({ service: "service:newsletter-service" })
+const PERSIST_NEWSLETTER_FORMATTED_CONTENTS = shouldPersistNewsletterFormattedContents()
 
 export async function addNewsletterToQueue(message: any, siteId: string, auth: any) {
     if (!message) throw new Error("Message body is empty or invalid.")
@@ -35,21 +42,25 @@ export async function addNewsletterToQueue(message: any, siteId: string, auth: a
     return { batchId: message["v:email-id"], messageId: response.MessageId }
 }
 
-async function sendSingleMail(request: SendEmailRequest, dbId: string, siteId: string, batchId: string) {
+async function sendSingleMail(prepared: PreparedEmail, dbId: string, siteId: string, batchId: string) {
+    const { request, recipientVariables } = prepared
+    const toEmail = request.Destination?.ToAddresses?.join("") || ""
+    const recipientData = JSON.stringify({ toEmail, variables: recipientVariables })
+    const formatedContents = PERSIST_NEWSLETTER_FORMATTED_CONTENTS ? safeStringify(request) : ""
     try {
         const cmd = new SendEmailCommand(request)
         const resp = await sesNewsletterClient().send(cmd)
         const messageId = resp.MessageId as string
-        await createNewsletterEntry(messageId, dbId, request)
+        await createNewsletterEntry(messageId, dbId, toEmail, recipientData, formatedContents)
         log.info({ messageId, siteId }, "email sent")
     } catch (e) {
         // SES failed (timeout, throttle, etc.) - generate temp messageId for error logging
         const tempMessageId = randomUUID()
-        log.error({ error: e, tempMessageId, siteId }, "SES send failed, recording error entry")
+        log.error({ err: e, tempMessageId, siteId }, "SES send failed, recording error entry")
         try {
-            await createNewsletterErrorEntry(tempMessageId, String(e), batchId, request)
+            await createNewsletterErrorEntry(tempMessageId, String(e), batchId, toEmail, recipientData, formatedContents)
         } catch (dbError) {
-            log.error({ dbError, tempMessageId, siteId }, "failed to record error entry in database")
+            log.error({ err: dbError, tempMessageId, siteId }, "failed to record error entry in database")
         }
         return { errorMessage: e }
     }
@@ -65,18 +76,17 @@ async function sendMail(siteId: string, dbId: string) {
     const q = createQueue({rateLimit: RATE_LIMIT});
     
     // Process requests with rate limiting
-    sendEmailRequests.forEach(req => {
+    sendEmailRequests.forEach(prepared => {
         q.addToQueue(
-            () => sendSingleMail(req, dbId, siteId, batchId),
-            /* TODO: How can Destination be null? Check types */
-            req.Destination?.ToAddresses?.join(',')
+            () => sendSingleMail(prepared, dbId, siteId, batchId),
+            prepared.request.Destination?.ToAddresses?.join(',')
         );
     });
 
     const results = await new Promise((resolve) => {
       q.onFinish((stats) => resolve(stats));
     });
-    console.log('Finished queue', results);
+    log.info({ results }, "Finished queue");
     
     return { batchId }
 }
@@ -118,6 +128,6 @@ export async function validateAndSend(message: Message) {
             )
         }
     } catch (e) {
-        log.error({ error: e, batchId: message.Body }, "error occurred at validateAndSend")
+        log.error({ err: e, batchId: message.Body }, "error occurred at validateAndSend")
     }
 }
