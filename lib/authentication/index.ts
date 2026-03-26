@@ -5,7 +5,12 @@ const log = logger.child({ path: "service/authenticate" })
 
 export async function authentication(token: string) {
     try {
-        const raw = Buffer.from(token.split(" ")[1], "base64").toString("utf-8")
+        const parts = token.split(" ")
+        if (parts.length < 2 || !parts[1]) {
+            log.warn("Malformed authorization header: missing credentials")
+            return false
+        }
+        const raw = Buffer.from(parts[1], "base64").toString("utf-8")
         const validKey = "api:" + process.env.API_KEY
         const a = Buffer.from(raw)
         const b = Buffer.from(validKey)

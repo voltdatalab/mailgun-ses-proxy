@@ -29,8 +29,8 @@ describe('/stats/[action] POST', () => {
         status: 'ok',
         data: {
           forRange: {
-            gte: new Date(requestBody.from).toISOString(),
-            lte: new Date(requestBody.to).toISOString(),
+            gte: new Date(requestBody.from),
+            lte: new Date(requestBody.to),
           },
           message: 'newsletter usage',
           count: 150,
@@ -46,7 +46,7 @@ describe('/stats/[action] POST', () => {
 
       // Assert
       expect(response.status).toBe(200)
-      expect(result).toEqual(mockUsageResult)
+      expect(result).toEqual(JSON.parse(JSON.stringify(mockUsageResult)))
       expect(getNewsletterUsage).toHaveBeenCalledWith(requestBody)
     })
 
@@ -120,8 +120,8 @@ describe('/stats/[action] POST', () => {
         status: 'ok',
         data: {
           forRange: {
-            gte: new Date(requestBody.from).toISOString(),
-            lte: new Date(requestBody.to).toISOString(),
+            gte: new Date(requestBody.from),
+            lte: new Date(requestBody.to),
           },
           message: 'newsletter usage',
           count: 0,
@@ -137,7 +137,7 @@ describe('/stats/[action] POST', () => {
 
       // Assert
       expect(response.status).toBe(200)
-      expect(result).toEqual(mockUsageResult)
+      expect(result).toEqual(JSON.parse(JSON.stringify(mockUsageResult)))
       expect(result.data.count).toBe(0)
     })
   })
@@ -215,7 +215,20 @@ describe('/stats/[action] POST', () => {
   })
 
   describe('request parsing errors', () => {
-    // Note: JSON parsing error test removed due to Vitest mocking limitations
+    it('should return 400 for malformed JSON body', async () => {
+      const mockRequest = {
+        json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected token')),
+      } as unknown as Request
+
+      const mockParams = Promise.resolve({ action: 'getNewsletterUsage' })
+
+      const response = await POST(mockRequest, { params: mockParams })
+      const result = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(result).toEqual({ message: 'Invalid JSON in request body' })
+      expect(getNewsletterUsage).not.toHaveBeenCalled()
+    })
 
     it('should handle malformed request body', async () => {
       // Arrange
@@ -258,8 +271,8 @@ describe('/stats/[action] POST', () => {
         status: 'ok',
         data: {
           forRange: {
-            gte: new Date(requestBody.from).toISOString(),
-            lte: new Date(requestBody.to).toISOString(),
+            gte: new Date(requestBody.from),
+            lte: new Date(requestBody.to),
           },
           message: 'newsletter usage',
           count: 999999,
@@ -275,7 +288,7 @@ describe('/stats/[action] POST', () => {
 
       // Assert
       expect(response.status).toBe(200)
-      expect(result).toEqual(mockUsageResult)
+      expect(result).toEqual(JSON.parse(JSON.stringify(mockUsageResult)))
     })
 
     it('should handle special characters in siteId', async () => {
@@ -296,8 +309,8 @@ describe('/stats/[action] POST', () => {
         status: 'ok',
         data: {
           forRange: {
-            gte: new Date(requestBody.from).toISOString(),
-            lte: new Date(requestBody.to).toISOString(),
+            gte: new Date(requestBody.from),
+            lte: new Date(requestBody.to),
           },
           message: 'newsletter usage',
           count: 42,
@@ -313,7 +326,7 @@ describe('/stats/[action] POST', () => {
 
       // Assert
       expect(response.status).toBe(200)
-      expect(result).toEqual(mockUsageResult)
+      expect(result).toEqual(JSON.parse(JSON.stringify(mockUsageResult)))
       expect(getNewsletterUsage).toHaveBeenCalledWith(requestBody)
     })
   })

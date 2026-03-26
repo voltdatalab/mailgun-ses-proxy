@@ -68,14 +68,16 @@ async function sendSingleMail(prepared: PreparedEmail, dbId: string, siteId: str
 
 async function sendMail(siteId: string, dbId: string) {
     const contents = await getNewsletterContent(dbId)
+    if (!contents) {
+        throw new Error(`Newsletter content not found for batch id: ${dbId}`)
+    }
     const sendEmailRequests = preparePayload(contents, siteId)
     const batchId = contents["v:email-id"]
-    
-    const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 20;
 
-    const q = createQueue({rateLimit: RATE_LIMIT});
-    
-    // Process requests with rate limiting
+    const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 20;
+    const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 100
+    const q = createQueue({ rateLimit: RATE_LIMIT, maxConcurrent: MAX_CONCURRENT });
+
     sendEmailRequests.forEach(prepared => {
         q.addToQueue(
             () => sendSingleMail(prepared, dbId, siteId, batchId),
@@ -83,17 +85,26 @@ async function sendMail(siteId: string, dbId: string) {
         );
     });
 
-    const results = await new Promise((resolve) => {
-      q.onFinish((stats) => resolve(stats));
-    });
+    const results = await q.waitUntilFinished()
     log.info({ results }, "Finished queue");
     
     return { batchId }
 }
 
+async function deleteMessage(receiptHandle?: string) {
+    if (!receiptHandle) return
+    await sqsClient().send(
+        new DeleteMessageCommand({
+            QueueUrl: QUEUE_URL.NEWSLETTER,
+            ReceiptHandle: receiptHandle,
+        })
+    )
+}
+
 export async function validateAndSend(message: Message) {
     if (!message.MessageAttributes || !message.Body) {
-        log.error({ message: safeStringify(message) }, "invalid message")
+        log.error({ message: safeStringify(message) }, "invalid message, deleting from queue")
+        await deleteMessage(message.ReceiptHandle)
         return
     }
 
@@ -101,7 +112,8 @@ export async function validateAndSend(message: Message) {
     const from = message.MessageAttributes["from"]?.StringValue
 
     if (!siteId || !from) {
-        log.error({ message: safeStringify(message) }, "missing required message attributes")
+        log.error({ message: safeStringify(message) }, "missing required message attributes, deleting from queue")
+        await deleteMessage(message.ReceiptHandle)
         return
     }
 
