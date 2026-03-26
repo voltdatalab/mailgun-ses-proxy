@@ -1,9 +1,9 @@
 import { EventsProps, QueryParams } from "@/types/default"
-import { prisma, saveNewsletterNotification } from "./database/db"
-import { formatAsMailgunEvent, parseNotificationEvent } from "../lib/core/aws-utils"
+import { getNewsletterMessage, prisma, saveNewsletterNotification } from "../database/db"
+import { formatAsMailgunEvent, parseNotificationEvent } from "../../lib/core/aws-utils"
 import { DeleteMessageCommand, ReceiveMessageCommandOutput } from "@aws-sdk/client-sqs"
-import logger from "../lib/core/logger"
-import { QUEUE_URL, sqsClient } from "./aws/awsHelper"
+import logger from "../../lib/core/logger"
+import { QUEUE_URL, sqsClient } from "../aws/awsHelper"
 
 function upsertStartParam(url: string, startVal: number) {
     url = url.slice(0, url.lastIndexOf("?"))
@@ -77,7 +77,6 @@ export async function fetchAnalyticsEvents(queryParams: QueryParams, siteId: str
     return response
 }
 
-
 export async function processNewsletterEmailEvents(response: ReceiveMessageCommandOutput) {
     const log = logger.child({ service: "processEmailEvents" })
     if (!response.Messages || response.Messages.length == 0)
@@ -86,15 +85,18 @@ export async function processNewsletterEmailEvents(response: ReceiveMessageComma
         if (msg.Body && msg.MessageId) {
             try {
                 const result = parseNotificationEvent(msg.MessageId, msg.Body)
-                await saveNewsletterNotification(result)
+                const message = await getNewsletterMessage(msg.MessageId)
+                if (message) {
+                    await saveNewsletterNotification(result)
+                }
+                const command = new DeleteMessageCommand({
+                    QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
+                    ReceiptHandle: msg.ReceiptHandle,
+                })
+                await sqsClient().send(command)
             } catch (e) {
-                log.error(e)
+                log.error(e, `[processNewsletterEmailEvents] Failed to process message ${msg.MessageId}`)
             }
-            const command = new DeleteMessageCommand({
-                QueueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION,
-                ReceiptHandle: msg.ReceiptHandle,
-            })
-            await sqsClient().send(command)
         }
     }
 }

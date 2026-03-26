@@ -1,9 +1,8 @@
 import { MailgunMessage } from "@/types/mailgun"
 import { NotificationEvent } from "../../lib/core/aws-utils"
 import { safeStringify } from "../../lib/core/common"
-import { PrismaClient } from "../../lib/generated"
-
-export const prisma = new PrismaClient()
+import { prisma } from "../../lib/database"
+export { prisma }
 
 function getEnvBoolean(name: string, fallback = false) {
     const raw = process.env[name]
@@ -14,7 +13,7 @@ function getEnvBoolean(name: string, fallback = false) {
 const PERSIST_NEWSLETTER_FORMATTED_CONTENTS = getEnvBoolean("PERSIST_NEWSLETTER_FORMATTED_CONTENTS", false)
 
 export async function createNewsletterBatchEntry(siteId: string, message: MailgunMessage) {
-    const batchId = message["v:email-id"]
+    const batchId = message["v:email-id"] || "no-batch-id-provided"
     const contents = safeStringify(message)
     const fromEmail = message.from
     return prisma.newsletterBatch.create({
@@ -82,9 +81,9 @@ export function saveNewsletterNotification(event: NotificationEvent) {
     })
 }
 
-export async function getNewsletterContent(id: string) {
+export async function getNewsletterContent(newsletterBatchId: string) {
     const result = await prisma.newsletterBatch.findUnique({
-        where: { id },
+        where: { id: newsletterBatchId },
         select: { contents: true }
     })
     return result && result.contents ? JSON.parse(result.contents) : null
@@ -99,5 +98,11 @@ export async function saveSystemEmailEvent(event: NotificationEvent) {
             notificationId: event.notificationId,
             timestamp: event.timestamp,
         },
+    })
+}
+
+export async function getNewsletterMessage(messageId: string) {
+    return prisma.newsletterMessages.findUnique({
+        where: { messageId }
     })
 }
