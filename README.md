@@ -1,7 +1,7 @@
 # Ghost CMS AWS SES Proxy (Mailgun Alternative)
 
 [![Build Status](https://img.shields.io/badge/Build-OK-green)](#)
-![Version](https://img.shields.io/github/package-json/v/tilak999/mailgun-ses-proxy)
+![Version](https://img.shields.io/github/package-json/v/typetale-app/mailgun-ses-proxy)
 ![License](https://img.shields.io/github/license/tilak999/mailgun-ses-proxy)
 [![Sponsor](https://img.shields.io/badge/Sponsor-typetale.app-purple)]([https://typetale.app?utm=mailgun-proxy](https://typetale.app?utm=mailgun-proxy))
 
