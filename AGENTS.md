@@ -49,6 +49,11 @@ Key tables: `newsletterBatch`, `newsletterMessages`, `newsletterErrors`, `newsle
 
 ## Development
 
+Using Bun runtime:
+- **Tests:** `bun run test` (Vitest, ~200 tests covering edge cases and performance).
+- **Build:** `bun run build` (Next.js build + server compilation).
+
+Using node runtime:
 - **Runtime:** Bun
 - **Tests:** `bun run test` (Vitest, ~200 tests covering edge cases and performance).
 - **Build:** `bun run build` (Next.js build + server compilation).
