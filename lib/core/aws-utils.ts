@@ -117,14 +117,21 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
     }
 }
 
-type MailgunEventPayload = Prisma.NewsletterNotificationsGetPayload<{
-    include: { newsletter: { include: { newsletterBatch: true } } }
-}>
+type MailgunEventPayload = {
+    id: string
+    type: string
+    messageId: string
+    timestamp: Date | null
+    created: Date
+    newsletter: {
+        toEmail: string
+        newsletterBatch: { batchId: string }
+    }
+}
 
 export function formatAsMailgunEvent(event: MailgunEventPayload[], url: string) {
     const format = (event: MailgunEventPayload) => {
         const eventTimestamp = (event.timestamp || event.created).getTime()
-        const originalSESEvent = JSON.parse(event.rawEvent)
         const out = {
             event: event.type,
             id: `${event.id}-${event.messageId}`,
@@ -138,7 +145,7 @@ export function formatAsMailgunEvent(event: MailgunEventPayload[], url: string) 
             },
         } as MailgunEvents
 
-        if (originalSESEvent.eventType == "Bounce") {
+        if (event.type === "failed") {
             out["severity"] = "permanent"
             out["reason"] = "suppress-bounce"
         }
