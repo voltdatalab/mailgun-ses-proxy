@@ -16,7 +16,8 @@ function upsertStartParam(url: string, startVal: number) {
 
 export async function getEmailEvents(params: EventsProps) {
     let skip = params.start || 0
-    let take = Math.min(params.limit || 3000, 3000)
+    // Fixed 3000 limit - ignore Ghost's limit=300 to reduce pagination round trips
+    let take = 3000
 
     let type = [params.type]
     if (params.type.includes("OR")) {
