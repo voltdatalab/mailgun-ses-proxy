@@ -33,7 +33,7 @@ export async function getEmailEvents(params: EventsProps) {
     const result = await prisma.newsletterNotifications.findMany({
         skip: skip,
         take: take,
-        orderBy: { id: params.order },
+        orderBy: { created: params.order },
         include: { newsletter: { include: { newsletterBatch: true } } },
         where: {
             type: { in: type },
