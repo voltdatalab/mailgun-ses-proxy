@@ -34,7 +34,21 @@ export async function getEmailEvents(params: EventsProps) {
         skip: skip,
         take: take,
         orderBy: { created: params.order },
-        include: { newsletter: { include: { newsletterBatch: true } } },
+        select: {
+            id: true,
+            type: true,
+            messageId: true,
+            timestamp: true,
+            created: true,
+            newsletter: {
+                select: {
+                    toEmail: true,
+                    newsletterBatch: {
+                        select: { batchId: true }
+                    }
+                }
+            }
+        },
         where: {
             type: { in: type },
             newsletter: { newsletterBatch: { siteId: params.siteId } },
