@@ -5,6 +5,8 @@ import { DeleteMessageCommand, ReceiveMessageCommandOutput } from "@aws-sdk/clie
 import logger from "../lib/core/logger"
 import { QUEUE_URL, sqsClient } from "./aws/awsHelper"
 
+const log = logger.child({ service: "events-service" })
+
 function upsertStartParam(url: string, startVal: number) {
     url = url.slice(0, url.lastIndexOf("?"))
     const urlObject = new URL(`${url}/next`)
@@ -15,8 +17,11 @@ function upsertStartParam(url: string, startVal: number) {
 }
 
 export async function getEmailEvents(params: EventsProps) {
+    const startTime = Date.now()
     let skip = params.start || 0
-    let take = params.limit || 300
+    // Ghost requests limit=300 by default. Use a larger internal page size to
+    // clear backlogs faster while still returning a normal Mailgun-compatible page.
+    let take = 3000
 
     let type = [params.type]
     if (params.type.includes("OR")) {
@@ -25,20 +30,40 @@ export async function getEmailEvents(params: EventsProps) {
 
     const range = { gt: new Date(params.begin * 1000), lt: new Date(params.end * 1000) }
 
+    const dbStart = Date.now()
     const result = await prisma.newsletterNotifications.findMany({
         skip: skip,
         take: take,
-        orderBy: { id: params.order },
-        include: { newsletter: { include: { newsletterBatch: true } } },
+        orderBy: { created: params.order },
+        select: {
+            id: true,
+            type: true,
+            messageId: true,
+            timestamp: true,
+            created: true,
+            newsletter: {
+                select: {
+                    toEmail: true,
+                    newsletterBatch: {
+                        select: { batchId: true }
+                    }
+                }
+            }
+        },
         where: {
             type: { in: type },
             newsletter: { newsletterBatch: { siteId: params.siteId } },
             created: range,
         },
     })
+    const dbMs = Date.now() - dbStart
 
-    const next = upsertStartParam(params.url, skip + take)
+    const next = upsertStartParam(params.url, skip + result.length)
     const output = await formatAsMailgunEvent(result, next)
+
+    const totalMs = Date.now() - startTime
+    log.info({ totalMs, dbMs, rows: result.length, skip, take, siteId: params.siteId }, "getEmailEvents complete")
+
     return output
 }
 
