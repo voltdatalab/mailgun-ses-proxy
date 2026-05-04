@@ -4,13 +4,8 @@ import { formatAsMailgunEvent, parseNotificationEvent } from "../lib/core/aws-ut
 import { DeleteMessageCommand, ReceiveMessageCommandOutput } from "@aws-sdk/client-sqs"
 import logger from "../lib/core/logger"
 import { QUEUE_URL, sqsClient } from "./aws/awsHelper"
-import { Prisma } from "../lib/generated"
 
 const log = logger.child({ service: "events-service" })
-
-type EventRow = Prisma.NewsletterNotificationsGetPayload<{
-    include: { newsletter: { include: { newsletterBatch: true } } }
-}>
 
 function upsertStartParam(url: string, startVal: number) {
     url = url.slice(0, url.lastIndexOf("?"))
@@ -23,10 +18,9 @@ function upsertStartParam(url: string, startVal: number) {
 
 export async function getEmailEvents(params: EventsProps) {
     const startTime = Date.now()
-    const MAX_TIME_MS = 50000 // 50s budget, 10s buffer for Ghost's 60s timeout
-    const BATCH_SIZE = 500
-    let currentSkip = params.start || 0
-    const initialSkip = currentSkip
+
+    let skip = params.start || 0
+    let take = 3000
 
     let type = [params.type]
     if (params.type.includes("OR")) {
@@ -35,50 +29,25 @@ export async function getEmailEvents(params: EventsProps) {
 
     const range = { gt: new Date(params.begin * 1000), lt: new Date(params.end * 1000) }
 
-    const whereClause = {
-        type: { in: type },
-        newsletter: { newsletterBatch: { siteId: params.siteId } },
-        created: range,
-    }
+    const dbStart = Date.now()
+    const result = await prisma.newsletterNotifications.findMany({
+        skip: skip,
+        take: take,
+        orderBy: { id: params.order },
+        include: { newsletter: { include: { newsletterBatch: true } } },
+        where: {
+            type: { in: type },
+            newsletter: { newsletterBatch: { siteId: params.siteId } },
+            created: range,
+        },
+    })
+    const dbMs = Date.now() - dbStart
 
-    // Fetch in small batches, accumulate until time budget runs out
-    let allResults: EventRow[] = []
-    let batchCount = 0
-
-    while (true) {
-        const batchStart = Date.now()
-        const batch = await prisma.newsletterNotifications.findMany({
-            skip: currentSkip,
-            take: BATCH_SIZE,
-            orderBy: { id: params.order },
-            include: { newsletter: { include: { newsletterBatch: true } } },
-            where: whereClause,
-        })
-        const batchMs = Date.now() - batchStart
-        batchCount++
-
-        allResults = allResults.concat(batch)
-        currentSkip += BATCH_SIZE
-
-        // No more results
-        if (batch.length < BATCH_SIZE) {
-            currentSkip = initialSkip + allResults.length
-            break
-        }
-
-        // Time budget exhausted
-        const elapsed = Date.now() - startTime
-        if (elapsed > MAX_TIME_MS) {
-            log.info({ elapsedMs: elapsed, batches: batchCount, totalRows: allResults.length, reason: "time_budget" }, "stopping batch fetch")
-            break
-        }
-    }
+    const next = upsertStartParam(params.url, skip + result.length)
+    const output = await formatAsMailgunEvent(result, next)
 
     const totalMs = Date.now() - startTime
-    const next = upsertStartParam(params.url, currentSkip)
-    const output = await formatAsMailgunEvent(allResults, next)
-
-    log.info({ totalMs, batches: batchCount, totalRows: allResults.length, skip: initialSkip, nextSkip: currentSkip, siteId: params.siteId }, "getEmailEvents complete")
+    log.info({ totalMs, dbMs, rows: result.length, skip, take, siteId: params.siteId }, "getEmailEvents complete")
 
     return output
 }
