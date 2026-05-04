@@ -16,7 +16,7 @@ function upsertStartParam(url: string, startVal: number) {
 
 export async function getEmailEvents(params: EventsProps) {
     let skip = params.start || 0
-    let take = 100000
+    let take = Math.min(params.limit || 10000, 10000)
 
     let type = [params.type]
     if (params.type.includes("OR")) {
@@ -48,7 +48,7 @@ export function validateQueryParams(searchParams: URLSearchParams): QueryParams 
     }
 
     const event = searchParams.get("event") || exception("event")
-    const begin = searchParams.get("begin") || exception("begin")
+    const begin = searchParams.get("begin") || header("begin")
     const end = searchParams.get("end") || exception("end")
 
     const queryParams = {
