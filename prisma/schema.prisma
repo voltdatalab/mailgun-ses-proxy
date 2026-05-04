@@ -20,6 +20,8 @@ model NewsletterBatch {
   created             DateTime             @default(now())
   NewslettersMessages NewsletterMessages[]
   NewslettersErrors   NewsletterErrors[]
+
+  @@index([siteId], map: "NewsletterBatch_siteId")
 }
 
 model NewsletterMessages {
@@ -55,6 +57,8 @@ model NewsletterNotifications {
   timestamp      DateTime
   created        DateTime           @default(now())
   newsletter     NewsletterMessages @relation(fields: [messageId], references: [messageId])
+
+  @@index([type, created], map: "NewsletterNotifications_type_created")
 }
 
 model SystemMailNotifications {
