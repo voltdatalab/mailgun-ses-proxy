@@ -4,8 +4,13 @@ import { formatAsMailgunEvent, parseNotificationEvent } from "../lib/core/aws-ut
 import { DeleteMessageCommand, ReceiveMessageCommandOutput } from "@aws-sdk/client-sqs"
 import logger from "../lib/core/logger"
 import { QUEUE_URL, sqsClient } from "./aws/awsHelper"
+import { Prisma } from "../lib/generated"
 
 const log = logger.child({ service: "events-service" })
+
+type EventRow = Prisma.NewsletterNotificationsGetPayload<{
+    include: { newsletter: { include: { newsletterBatch: true } } }
+}>
 
 function upsertStartParam(url: string, startVal: number) {
     url = url.slice(0, url.lastIndexOf("?"))
@@ -37,7 +42,7 @@ export async function getEmailEvents(params: EventsProps) {
     }
 
     // Fetch in small batches, accumulate until time budget runs out
-    let allResults: Awaited<ReturnType<typeof prisma.newsletterNotifications.findMany>> = []
+    let allResults: EventRow[] = []
     let batchCount = 0
 
     while (true) {
