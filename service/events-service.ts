@@ -16,7 +16,7 @@ function upsertStartParam(url: string, startVal: number) {
 
 export async function getEmailEvents(params: EventsProps) {
     let skip = params.start || 0
-    let take = params.limit || 300
+    let take = 100000
 
     let type = [params.type]
     if (params.type.includes("OR")) {
@@ -63,15 +63,15 @@ export function validateQueryParams(searchParams: URLSearchParams): QueryParams 
     return queryParams
 }
 
-export async function fetchAnalyticsEvents(queryParams: QueryParams, siteId: string, url: string) {
+export async function fetchAnalyticsEvents(queryParam: QueryParams, siteId: string, url: string) {
     const response = await getEmailEvents({
         siteId,
-        type: queryParams.event,
-        begin: queryParams.begin,
-        end: queryParams.end,
-        order: queryParams.order,
-        limit: queryParams.limit,
-        start: queryParams.start,
+        type: queryParam.event,
+        begin: queryParam.begin,
+        end: queryParam.end,
+        order: queryParam.order,
+        limit: queryParam.limit,
+        start: queryParam.start,
         url,
     })
     return response
