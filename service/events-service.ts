@@ -5,6 +5,8 @@ import { DeleteMessageCommand, ReceiveMessageCommandOutput } from "@aws-sdk/clie
 import logger from "../lib/core/logger"
 import { QUEUE_URL, sqsClient } from "./aws/awsHelper"
 
+const log = logger.child({ service: "events-service" })
+
 function upsertStartParam(url: string, startVal: number) {
     url = url.slice(0, url.lastIndexOf("?"))
     const urlObject = new URL(`${url}/next`)
@@ -16,7 +18,6 @@ function upsertStartParam(url: string, startVal: number) {
 
 export async function getEmailEvents(params: EventsProps) {
     let skip = params.start || 0
-    // Fixed 3000 limit - ignore Ghost's limit=300 to reduce pagination round trips
     let take = 3000
 
     let type = [params.type]
@@ -26,6 +27,7 @@ export async function getEmailEvents(params: EventsProps) {
 
     const range = { gt: new Date(params.begin * 1000), lt: new Date(params.end * 1000) }
 
+    const dbStart = Date.now()
     const result = await prisma.newsletterNotifications.findMany({
         skip: skip,
         take: take,
@@ -37,9 +39,15 @@ export async function getEmailEvents(params: EventsProps) {
             created: range,
         },
     })
+    const dbElapsed = Date.now() - dbStart
 
+    const fmtStart = Date.now()
     const next = upsertStartParam(params.url, skip + take)
     const output = await formatAsMailgunEvent(result, next)
+    const fmtElapsed = Date.now() - fmtStart
+
+    log.info({ dbMs: dbElapsed, fmtMs: fmtElapsed, rowsFetched: result.length, take, skip, siteId: params.siteId }, "getEmailEvents timing")
+
     return output
 }
 
