@@ -22,7 +22,7 @@ async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
     const { siteId, slug } = await params
     try {
         const queryParams = validateQueryParams(req.nextUrl.searchParams)
-        log.debug({ queryParams, siteId, slug }, "query params")
+        log.debug({ queryParams, siteId, slug, fullUrl: req.url, method: req.method }, "query params")
         const events = await fetchAnalyticsEvents(queryParams, siteId, req.url)
         log.info({ count: events.items.length, siteId, slug }, "analytics events count")
         return Response.json(events, { status: 200 })
@@ -33,4 +33,4 @@ async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
     }
 }
 
-export const GET = fetchAnalyticsEvent 
+export const GET = fetchAnalyticsEvent
