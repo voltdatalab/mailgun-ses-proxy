@@ -17,8 +17,11 @@ function upsertStartParam(url: string, startVal: number) {
 }
 
 export async function getEmailEvents(params: EventsProps) {
-    let skip = params.start || 0
-    let take = 3000
+    const startTime = Date.now()
+    const MAX_TIME_MS = 50000 // 50s budget, 10s buffer for Ghost's 60s timeout
+    const BATCH_SIZE = 500
+    let currentSkip = params.start || 0
+    const initialSkip = currentSkip
 
     let type = [params.type]
     if (params.type.includes("OR")) {
@@ -27,26 +30,50 @@ export async function getEmailEvents(params: EventsProps) {
 
     const range = { gt: new Date(params.begin * 1000), lt: new Date(params.end * 1000) }
 
-    const dbStart = Date.now()
-    const result = await prisma.newsletterNotifications.findMany({
-        skip: skip,
-        take: take,
-        orderBy: { id: params.order },
-        include: { newsletter: { include: { newsletterBatch: true } } },
-        where: {
-            type: { in: type },
-            newsletter: { newsletterBatch: { siteId: params.siteId } },
-            created: range,
-        },
-    })
-    const dbElapsed = Date.now() - dbStart
+    const whereClause = {
+        type: { in: type },
+        newsletter: { newsletterBatch: { siteId: params.siteId } },
+        created: range,
+    }
 
-    const fmtStart = Date.now()
-    const next = upsertStartParam(params.url, skip + take)
-    const output = await formatAsMailgunEvent(result, next)
-    const fmtElapsed = Date.now() - fmtStart
+    // Fetch in small batches, accumulate until time budget runs out
+    let allResults: Awaited<ReturnType<typeof prisma.newsletterNotifications.findMany>> = []
+    let batchCount = 0
 
-    log.info({ dbMs: dbElapsed, fmtMs: fmtElapsed, rowsFetched: result.length, take, skip, siteId: params.siteId }, "getEmailEvents timing")
+    while (true) {
+        const batchStart = Date.now()
+        const batch = await prisma.newsletterNotifications.findMany({
+            skip: currentSkip,
+            take: BATCH_SIZE,
+            orderBy: { id: params.order },
+            include: { newsletter: { include: { newsletterBatch: true } } },
+            where: whereClause,
+        })
+        const batchMs = Date.now() - batchStart
+        batchCount++
+
+        allResults = allResults.concat(batch)
+        currentSkip += BATCH_SIZE
+
+        // No more results
+        if (batch.length < BATCH_SIZE) {
+            currentSkip = initialSkip + allResults.length
+            break
+        }
+
+        // Time budget exhausted
+        const elapsed = Date.now() - startTime
+        if (elapsed > MAX_TIME_MS) {
+            log.info({ elapsedMs: elapsed, batches: batchCount, totalRows: allResults.length, reason: "time_budget" }, "stopping batch fetch")
+            break
+        }
+    }
+
+    const totalMs = Date.now() - startTime
+    const next = upsertStartParam(params.url, currentSkip)
+    const output = await formatAsMailgunEvent(allResults, next)
+
+    log.info({ totalMs, batches: batchCount, totalRows: allResults.length, skip: initialSkip, nextSkip: currentSkip, siteId: params.siteId }, "getEmailEvents complete")
 
     return output
 }
