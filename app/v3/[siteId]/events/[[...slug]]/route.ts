@@ -5,29 +5,21 @@ import { NextRequest } from "next/server"
 const log = logger.child({ path: "app/v3/events" })
 type pathParam = { params: Promise<{ siteId: string, slug?: string[] }> }
 
-/**
- * GET /api/v3/events/{siteId}/{...slug}
- * 
- * Retrieves analytics events for a specific site with optional filtering parameters.
- * 
- * @param req - The Next.js request object containing query parameters
- * @param params - Path parameters containing siteId and optional slug array
- * @param params.siteId - The unique identifier for the site
- * @param params.slug - Optional array of additional path segments
- * 
- * @returns JSON response containing analytics events data or error message
- * 
- */
 async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
     const { siteId, slug } = await params
+    const startTime = Date.now()
     try {
         const queryParams = validateQueryParams(req.nextUrl.searchParams)
-        log.debug({ queryParams, siteId, slug, fullUrl: req.url, method: req.method }, "query params")
+        log.info({ queryParams, siteId, slug, fullUrl: req.url, method: req.method }, "incoming request")
+        
         const events = await fetchAnalyticsEvents(queryParams, siteId, req.url)
-        log.info({ count: events.items.length, siteId, slug }, "analytics events count")
+        
+        const elapsed = Date.now() - startTime
+        log.info({ count: events.items.length, siteId, slug, elapsedMs: elapsed, elapsedSec: (elapsed / 1000).toFixed(2) }, "analytics events response")
         return Response.json(events, { status: 200 })
     } catch (e) {
-        log.error(e, 'error when fetching analytics events')
+        const elapsed = Date.now() - startTime
+        log.error({ err: e, elapsedMs: elapsed, elapsedSec: (elapsed / 1000).toFixed(2) }, 'error when fetching analytics events')
         const errorMessage = e instanceof Error ? e.message : "An error occurred";
         return Response.json({ message: errorMessage }, { status: 400 })
     }
