@@ -90,6 +90,7 @@ export interface NotificationEvent {
     notificationId: string
     type: string
     isNewsletterEmailEvent: boolean
+    isTransactionalEmailEvent: boolean
     messageId: string
     timestamp: Date
     raw: any
@@ -118,7 +119,8 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
             timestamp?: string | Date,
             tags: {
                 batchId: string[],
-                "ghost-email": string[]
+                "ghost-email": string[],
+                "transactional-email": string[]
             }
         },
         open?: { timestamp?: string | Date }
@@ -131,6 +133,7 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
         type: String(mailgunType).toLocaleLowerCase(),
         messageId: event.mail.messageId,
         isNewsletterEmailEvent: event.mail.tags?.["ghost-email"]?.length > 0,
+        isTransactionalEmailEvent: event.mail.tags?.["transactional-email"]?.length > 0,
         timestamp: normalizeEventTimestamp(event.open?.timestamp || event.mail.timestamp, new Date()),
         raw: inputEvent,
     }

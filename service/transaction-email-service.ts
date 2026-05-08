@@ -1,12 +1,12 @@
-import { SendEmailCommand } from "@aws-sdk/client-sesv2"
-import { sesSystemClient } from "./aws/awsHelper"
 import logger from "@/lib/core/logger"
 import { prisma } from "@/service/database/db"
+import { MessageTag, SendEmailCommand } from "@aws-sdk/client-sesv2"
+import { sesSystemClient } from "./aws/awsHelper"
 import { EmailPayload } from "./validation-service/validation"
 
 const log = logger.child({ service: "service:transactional-email-service" })
 
-function formatEmail(email: EmailPayload) {
+function formatEmail(email: EmailPayload, tags: MessageTag[]) {
     if (!process.env.TRANSACTIONAL_CONFIGURATION_SET_NAME)
         throw "env variable TRANSACTIONAL_CONFIGURATION_SET_NAME is not defined"
     return {
@@ -29,6 +29,7 @@ function formatEmail(email: EmailPayload) {
                 },
             },
         },
+        EmailTags: tags
     }
 }
 
@@ -36,7 +37,8 @@ function formatEmail(email: EmailPayload) {
 export async function sendSystemMail(email: EmailPayload) {
     if (!email.to) throw new Error("Email to address is required")
 
-    const cmd = new SendEmailCommand(formatEmail(email))
+    const mail = formatEmail(email, [{ Name: 'transactional-email', Value: 'true' }])
+    const cmd = new SendEmailCommand(mail)
     const resp = await sesSystemClient().send(cmd)
 
     if (resp.MessageId) {

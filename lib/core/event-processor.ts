@@ -32,8 +32,8 @@ export function createEventProcessor(config: EventProcessorConfig) {
 
         const result = parseNotificationEvent(message.MessageId, message.Body)
 
-        if (!result.isNewsletterEmailEvent) {
-            log.warn({ name, messageId: result.messageId }, "Event is not a newsletter email event")
+        if (!result.isNewsletterEmailEvent && !result.isTransactionalEmailEvent) {
+            log.warn({ name, messageId: result.messageId }, "Event is neither a newsletter nor a transactional email event, discarding")
             return
         }
 
