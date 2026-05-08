@@ -1,9 +1,9 @@
-import { 
-    Message, 
-    ReceiveMessageCommand, 
-    DeleteMessageCommand, 
+import {
+    DeleteMessageCommand,
+    Message,
     MessageSystemAttributeName,
-    QueueAttributeName
+    QueueAttributeName,
+    ReceiveMessageCommand
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
@@ -23,12 +23,12 @@ interface WorkerConfig {
  * Handles polling, error logging, and message deletion upon successful processing.
  */
 export async function startWorker(config: WorkerConfig) {
-    const { 
-        name, 
-        queueUrl, 
-        visibilityTimeout = 30, 
-        waitTimeSeconds = 20, 
-        handler 
+    const {
+        name,
+        queueUrl,
+        visibilityTimeout = 30,
+        waitTimeSeconds = 20,
+        handler
     } = config
 
     if (!queueUrl) {
@@ -51,19 +51,18 @@ export async function startWorker(config: WorkerConfig) {
         WaitTimeSeconds: waitTimeSeconds,
     }
 
-    const receiveCommand = new ReceiveMessageCommand(input)
-
     while (true) {
         try {
+            const receiveCommand = new ReceiveMessageCommand(input)
             const { Messages } = await client.send(receiveCommand)
-            
+
             if (!Messages || Messages.length === 0) continue
 
             for (const message of Messages) {
                 try {
                     // Process message
                     await handler(message)
-                    
+
                     // On success, delete from queue
                     await client.send(new DeleteMessageCommand({
                         QueueUrl: queueUrl,
@@ -72,11 +71,11 @@ export async function startWorker(config: WorkerConfig) {
                 } catch (error) {
                     // On error, we leave the message in the queue for retry 
                     // (unless it's a permanent failure, which the handler should handle internally)
-                    log.error({ name, messageId: message.MessageId, error: String(error) }, "Error processing message")
+                    log.error({ name, messageId: message.MessageId, error }, "Error processing message")
                 }
             }
         } catch (error) {
-            log.error({ name, error }, "Error polling SQS")
+            log.fatal({ name, error }, "---------- Error polling SQS --------------")
             // exponential backoff or simple delay on polling error
             await new Promise(resolve => setTimeout(resolve, 5000))
         }
