@@ -2,7 +2,7 @@
 
 [![Build Status](https://img.shields.io/badge/Build-OK-green)](#)
 ![Version](https://img.shields.io/github/package-json/v/typetale-app/mailgun-ses-proxy)
-![License](https://img.shields.io/github/license/tilak999/mailgun-ses-proxy)
+![License](https://img.shields.io/github/license/typetale-app/mailgun-ses-proxy)
 [![Sponsor](https://img.shields.io/badge/Sponsor-typetale.app-purple)]([https://typetale.app?utm=mailgun-proxy](https://typetale.app?utm=mailgun-proxy))
 
 **Save up to 90% on Ghost CMS email costs.** This API server acts as a high-performance proxy, allowing you to use **Amazon SES** for newsletters while mimicking the **Mailgun v3 API**.
