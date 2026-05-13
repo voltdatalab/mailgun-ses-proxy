@@ -29,12 +29,17 @@ app.prepare().then(() => {
 
     // process the SES queues for emails and events
     processNewsletterQueue()
+        .then(() => logger.warn("Newsletter queue stopped - it should not have stopped"))
         .catch((e) => { logger.error(e, "newsletter queue crashed") })
         .finally(() => process.exit(1))
+
     processNewsletterEventsQueue()
+        .then(() => logger.warn("Newsletter events queue stopped - it should not have stopped"))
         .catch((e) => { logger.error(e, "newsletter events queue crashed") })
         .finally(() => process.exit(1))
+
     processSystemEventsQueue()
+        .then(() => logger.warn("System events queue stopped - it should not have stopped"))
         .catch((e) => { logger.error(e, "system events queue crashed") })
         .finally(() => process.exit(1))
 

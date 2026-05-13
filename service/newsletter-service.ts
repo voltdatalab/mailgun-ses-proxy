@@ -1,11 +1,11 @@
-import { TaskQueue } from "../lib/task-queue"
-import { MailgunMessage } from "../types/mailgun"
 import { SendEmailCommand } from "@aws-sdk/client-sesv2"
-import { DeleteMessageCommand, Message, SendMessageCommand } from "@aws-sdk/client-sqs"
+import { Message, SendMessageCommand } from "@aws-sdk/client-sqs"
 import { randomUUID } from "node:crypto"
 import { PreparedEmail, preparePayload } from "../lib/core/aws-utils"
 import { safeStringify } from "../lib/core/common"
 import logger from "../lib/core/logger"
+import { TaskQueue } from "../lib/task-queue"
+import { MailgunMessage } from "../types/mailgun"
 import { QUEUE_URL, sesNewsletterClient, sqsClient } from "./aws/awsHelper"
 import {
     checkNewsletterAlreadySent,
@@ -18,7 +18,6 @@ import {
 
 const log = logger.child({ service: "service:newsletter-service" })
 const PERSIST_FORMATTED_CONTENTS = shouldPersistNewsletterFormattedContents()
-const MAX_RECEIVE_COUNT = 3
 
 // ─── Public API ──────────────────────────────────────────────
 
@@ -43,13 +42,8 @@ export async function addNewsletterToQueue(message: MailgunMessage, siteId: stri
 }
 
 /**
- * Processes a single SQS message: validates, sends all emails, handles retries.
- *
- * Retry strategy:
- *  - On success → message is deleted from SQS
- *  - On partial failure → message stays in SQS for re-delivery;
- *    already-sent recipients are skipped via idempotency check
- *  - After MAX_RECEIVE_COUNT retries → message is deleted to prevent infinite loops
+ * Processes a single SQS message: validates required fields then sends all emails.
+ * Resolves → worker deletes. Throws → worker retries (idempotency skips already-sent recipients).
  */
 export async function validateAndSend(message: Message) {
     const batchId = message.Body
@@ -58,25 +52,10 @@ export async function validateAndSend(message: Message) {
 
     if (!batchId || !siteId || !from) {
         log.error({ message: safeStringify(message) }, "invalid or incomplete SQS message, discarding")
-        await deleteFromQueue(message.ReceiptHandle)
         return
     }
 
-    const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || "0")
-    if (receiveCount > MAX_RECEIVE_COUNT) {
-        log.error({ batchId, receiveCount }, "batch exceeded max retries, discarding")
-        await deleteFromQueue(message.ReceiptHandle)
-        return
-    }
-
-    try {
-        await processBatch(siteId, batchId)
-        await deleteFromQueue(message.ReceiptHandle)
-    } catch (e) {
-        // Leave the message in SQS — it will be re-delivered after the visibility timeout.
-        // On retry, already-sent recipients are skipped via the idempotency check.
-        log.error({ err: e, batchId, receiveCount }, "batch processing failed, will retry")
-    }
+    await processBatch(siteId, batchId)
 }
 
 // ─── Internal: Batch Processing ──────────────────────────────
@@ -88,7 +67,9 @@ export async function validateAndSend(message: Message) {
 async function processBatch(siteId: string, newsletterBatchId: string) {
     const contents = await getNewsletterContent(newsletterBatchId)
     if (!contents) {
-        throw new Error(`Newsletter batch not found: ${newsletterBatchId}`)
+        // Permanent — batch is always written before the SQS message is enqueued.
+        log.error({ newsletterBatchId }, "Newsletter batch not found in DB — discarding message")
+        return
     }
 
     const emails = preparePayload(contents, siteId)
@@ -122,10 +103,8 @@ async function processBatch(siteId: string, newsletterBatchId: string) {
 // ─── Internal: Single Email ──────────────────────────────────
 
 /**
- * Sends a single email via SES with idempotency protection.
- * - Checks if the recipient was already sent in this batch (prevents duplicates on retry)
- * - On success, records in `newsletterMessages`
- * - On failure, records in `newsletterErrors` and re-throws for the queue to track
+ * Sends a single email via SES.
+ * Skips already-sent recipients (idempotency). Records result in DB. Throws on failure.
  */
 async function sendSingleEmail(
     prepared: PreparedEmail,
@@ -138,7 +117,7 @@ async function sendSingleEmail(
     const recipientData = JSON.stringify({ toEmail, variables: recipientVariables })
     const formattedContents = PERSIST_FORMATTED_CONTENTS ? safeStringify(request) : ""
 
-    // Idempotency: skip if this recipient was already sent in a previous attempt
+    // Skip if already sent in a previous attempt.
     if (toEmail && await checkNewsletterAlreadySent(newsletterBatchId, toEmail)) {
         log.info({ toEmail, newsletterBatchId }, "skipping already-sent recipient")
         return
@@ -157,12 +136,4 @@ async function sendSingleEmail(
     }
 }
 
-// ─── Internal: SQS Helpers ───────────────────────────────────
 
-async function deleteFromQueue(receiptHandle?: string) {
-    if (!receiptHandle) return
-    await sqsClient().send(new DeleteMessageCommand({
-        QueueUrl: QUEUE_URL.NEWSLETTER,
-        ReceiptHandle: receiptHandle,
-    }))
-}

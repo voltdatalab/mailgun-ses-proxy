@@ -8,5 +8,4 @@ export const handleSystemEmailEvent = createEventProcessor({
     name: "system-events",
     lookupMessage: getSystemMessage,
     saveNotification: saveSystemEmailEvent,
-    maxRetries: 3
 })

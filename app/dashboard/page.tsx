@@ -5,8 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn, formatRelativeTime } from "@/lib/utils"
-import { AlertCircle, ArrowUpRight, CheckCircle2, Inbox, Loader2, Mail, ShieldAlert, TrendingUp } from "lucide-react"
-import { useEffect, useState } from "react"
+import { AlertCircle, ArrowUpRight, CheckCircle2, Inbox, Loader2, Mail, RefreshCw, ShieldAlert, TrendingUp, Wifi, WifiOff } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
 
 interface StatsData {
     overview: {
@@ -34,9 +34,32 @@ interface StatsData {
     }[]
 }
 
+interface WorkerStatus {
+    name: string
+    alive: boolean
+    lastHeartbeat: number | null
+    pollCount: number
+    startedAt: string | null
+    lastError: string | null
+}
+
 export default function DashboardPage() {
     const [stats, setStats] = useState<StatsData | null>(null)
     const [loading, setLoading] = useState(true)
+    const [workers, setWorkers] = useState<WorkerStatus[]>([])
+    const [workersLoading, setWorkersLoading] = useState(true)
+    const [workersLastUpdated, setWorkersLastUpdated] = useState<Date | null>(null)
+
+    const fetchWorkers = useCallback(() => {
+        fetch("/dashboard/api/workers")
+            .then((r) => r.json())
+            .then((data) => {
+                setWorkers(data.workers ?? [])
+                setWorkersLastUpdated(new Date())
+            })
+            .catch(console.error)
+            .finally(() => setWorkersLoading(false))
+    }, [])
 
     useEffect(() => {
         fetch("/dashboard/api/stats")
@@ -45,6 +68,12 @@ export default function DashboardPage() {
             .catch(console.error)
             .finally(() => setLoading(false))
     }, [])
+
+    useEffect(() => {
+        fetchWorkers()
+        const interval = setInterval(fetchWorkers, 15_000)
+        return () => clearInterval(interval)
+    }, [fetchWorkers])
 
     if (loading) {
         return (
@@ -114,6 +143,99 @@ export default function DashboardPage() {
                 <h1 className="text-3xl font-bold tracking-tight">Dashboard Overview</h1>
                 <p className="text-muted-foreground">Monitor your email sending infrastructure at a glance</p>
             </div>
+
+            {/* Worker Health Panel */}
+            <Card className="border-muted/50">
+                <CardHeader className="flex flex-row items-center justify-between pb-3">
+                    <div>
+                        <CardTitle className="text-lg">Queue Workers</CardTitle>
+                        <CardDescription>Live status of background SQS polling loops</CardDescription>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        {workersLastUpdated && (
+                            <span className="text-[10px] text-muted-foreground">
+                                Updated {workersLastUpdated.toLocaleTimeString()}
+                            </span>
+                        )}
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => { setWorkersLoading(true); fetchWorkers() }}
+                            title="Refresh worker status"
+                        >
+                            <RefreshCw className={cn("h-3.5 w-3.5", workersLoading && "animate-spin")} />
+                        </Button>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    {workersLoading && workers.length === 0 ? (
+                        <div className="flex items-center justify-center py-6">
+                            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                        </div>
+                    ) : workers.length === 0 ? (
+                        <div className="flex items-center gap-2 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                            <WifiOff className="h-4 w-4 shrink-0" />
+                            No workers registered yet. Workers appear after first server start.
+                        </div>
+                    ) : (
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            {workers.map((w) => {
+                                const hbAgo = w.lastHeartbeat
+                                    ? Math.round((Date.now() - w.lastHeartbeat) / 1000)
+                                    : null
+                                return (
+                                    <div
+                                        key={w.name}
+                                        className={cn(
+                                            "flex flex-col gap-2 rounded-lg border p-4 transition-colors",
+                                            w.alive
+                                                ? "border-emerald-500/30 bg-emerald-500/5"
+                                                : "border-destructive/40 bg-destructive/5",
+                                        )}
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-sm font-medium font-mono truncate" title={w.name}>
+                                                {w.name}
+                                            </span>
+                                            {w.alive ? (
+                                                <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 hover:bg-emerald-500/20 gap-1">
+                                                    <Wifi className="h-3 w-3" /> Running
+                                                </Badge>
+                                            ) : (
+                                                <Badge variant="destructive" className="gap-1">
+                                                    <WifiOff className="h-3 w-3" /> Dead
+                                                </Badge>
+                                            )}
+                                        </div>
+                                        <div className="space-y-1 text-[11px] text-muted-foreground">
+                                            <div className="flex justify-between">
+                                                <span>Last heartbeat</span>
+                                                <span className={cn("font-medium", !w.alive && "text-destructive")}>
+                                                    {hbAgo === null
+                                                        ? "never"
+                                                        : hbAgo < 5
+                                                        ? "just now"
+                                                        : `${hbAgo}s ago`}
+                                                </span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span>Poll count</span>
+                                                <span className="font-medium">{w.pollCount.toLocaleString()}</span>
+                                            </div>
+                                        </div>
+                                        {w.lastError && (
+                                            <div className="mt-1 rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-[10px] text-destructive font-mono break-all line-clamp-3" title={w.lastError}>
+                                                {w.lastError}
+                                            </div>
+                                        )}
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    )}
+                </CardContent>
+            </Card>
 
             {/* Stat Cards */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

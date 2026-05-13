@@ -9,7 +9,7 @@ import { handleSystemEmailEvent } from "./system-email-notification"
  * Uses a long visibility timeout (15m) to handle large batch sends.
  */
 export async function processNewsletterQueue() {
-    await startWorker({
+    return startWorker({
         name: "newsletter-sender",
         queueUrl: QUEUE_URL.NEWSLETTER!,
         visibilityTimeout: 900, // 15 minutes for processing batches
@@ -21,7 +21,7 @@ export async function processNewsletterQueue() {
  * Processes delivery/bounce events for newsletter emails.
  */
 export async function processNewsletterEventsQueue() {
-    await startWorker({
+    return startWorker({
         name: "newsletter-events",
         queueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION!,
         handler: handleNewsletterEmailEvent
@@ -32,7 +32,7 @@ export async function processNewsletterEventsQueue() {
  * Processes delivery/bounce events for system/transactional emails.
  */
 export async function processSystemEventsQueue() {
-    await startWorker({
+    return startWorker({
         name: "system-events",
         queueUrl: QUEUE_URL.SYSTEM_NOTIFICATION!,
         handler: handleSystemEmailEvent

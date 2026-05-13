@@ -7,8 +7,16 @@ import {
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
+import { heartbeat, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
+
+// Messages received more than this many times are discarded as poison-pills.
+const MAX_RECEIVE_COUNT = 3
+
+// Exponential back-off bounds for transient poll errors (ms).
+const POLL_BACKOFF_MIN_MS = 1_000
+const POLL_BACKOFF_MAX_MS = 30_000
 
 interface WorkerConfig {
     name: string
@@ -19,8 +27,11 @@ interface WorkerConfig {
 }
 
 /**
- * Starts a long-polling SQS worker.
- * Handles polling, error logging, and message deletion upon successful processing.
+ * Long-polling SQS worker.
+ *  - handler resolves → message deleted
+ *  - handler throws   → message left in SQS for retry
+ *  - poll error       → exponential back-off, loop continues
+ *  - receiveCount > MAX_RECEIVE_COUNT → deleted without calling handler
  */
 export async function startWorker(config: WorkerConfig) {
     const {
@@ -28,56 +39,111 @@ export async function startWorker(config: WorkerConfig) {
         queueUrl,
         visibilityTimeout = 30,
         waitTimeSeconds = 20,
-        handler
+        handler,
     } = config
 
-    if (!queueUrl) {
-        log.error({ name }, "Queue URL is missing, worker cannot start")
-        return
-    }
+    const client = bootstrapWorker(name, queueUrl)
+    if (!client) return
 
     log.info({ name, queueUrl }, `Starting SQS worker: ${name}`)
+    registerWorker(name)
 
-    const client = sqsClient()
-    const input = {
+    const receiveInput = {
         QueueUrl: queueUrl,
         AttributeNames: ["All"] as QueueAttributeName[],
         MessageAttributeNames: ["All"],
         MessageSystemAttributeNames: [
             MessageSystemAttributeName.SentTimestamp,
-            MessageSystemAttributeName.ApproximateReceiveCount
+            MessageSystemAttributeName.ApproximateReceiveCount,
         ],
         VisibilityTimeout: visibilityTimeout,
         WaitTimeSeconds: waitTimeSeconds,
     }
 
+    let pollBackoffMs = POLL_BACKOFF_MIN_MS
+
     while (true) {
+        let messages: Message[] | undefined
         try {
-            const receiveCommand = new ReceiveMessageCommand(input)
-            const { Messages } = await client.send(receiveCommand)
-
-            if (!Messages || Messages.length === 0) continue
-
-            for (const message of Messages) {
-                try {
-                    // Process message
-                    await handler(message)
-
-                    // On success, delete from queue
-                    await client.send(new DeleteMessageCommand({
-                        QueueUrl: queueUrl,
-                        ReceiptHandle: message.ReceiptHandle
-                    }))
-                } catch (error) {
-                    // On error, we leave the message in the queue for retry 
-                    // (unless it's a permanent failure, which the handler should handle internally)
-                    log.error({ name, messageId: message.MessageId, error }, "Error processing message")
-                }
-            }
-        } catch (error) {
-            log.fatal({ name, error }, "---------- Error polling SQS --------------")
-            // exponential backoff or simple delay on polling error
-            await new Promise(resolve => setTimeout(resolve, 5000))
+            const { Messages } = await client.send(new ReceiveMessageCommand(receiveInput))
+            messages = Messages
+            pollBackoffMs = POLL_BACKOFF_MIN_MS
+        } catch (pollError) {
+            log.error({ name, err: pollError }, `Poll error — retrying in ${pollBackoffMs}ms`)
+            await sleep(pollBackoffMs)
+            pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
+            continue
         }
+
+        if (!messages || messages.length === 0) {
+            heartbeat(name)
+            continue
+        }
+
+        for (const message of messages) {
+            const receiveCount = parseInt(
+                message.Attributes?.ApproximateReceiveCount ?? "0",
+                10
+            )
+
+            if (receiveCount > MAX_RECEIVE_COUNT) {
+                log.error(
+                    { name, messageId: message.MessageId, receiveCount },
+                    "Message exceeded max receive count — discarding"
+                )
+                await deleteMessage(client, queueUrl, message)
+                continue
+            }
+
+            try {
+                await handler(message)
+                await deleteMessage(client, queueUrl, message)
+            } catch (handlerError) {
+                log.error(
+                    { name, messageId: message.MessageId, receiveCount, err: handlerError },
+                    "Handler error — message left in SQS for retry"
+                )
+            }
+        }
+
+        heartbeat(name)
     }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Validates config and initialises the SQS client. Returns null if setup fails. */
+function bootstrapWorker(name: string, queueUrl: string): ReturnType<typeof sqsClient> | null {
+    if (!queueUrl) {
+        log.error({ name }, "[bootstrap] Queue URL missing — worker will not start")
+        return null
+    }
+
+    try {
+        return sqsClient()
+    } catch (err) {
+        log.error({ name, err }, "[bootstrap] SQS client init failed (check SQS_REGION) — worker will not start")
+        return null
+    }
+}
+
+async function deleteMessage(
+    client: ReturnType<typeof sqsClient>,
+    queueUrl: string,
+    message: Message
+): Promise<void> {
+    if (!message.ReceiptHandle) return
+    try {
+        await client.send(new DeleteMessageCommand({
+            QueueUrl: queueUrl,
+            ReceiptHandle: message.ReceiptHandle,
+        }))
+    } catch (err) {
+        // Non-fatal — message becomes visible again after the visibility timeout.
+        log.warn({ messageId: message.MessageId, err }, "Failed to delete message from SQS")
+    }
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
 }

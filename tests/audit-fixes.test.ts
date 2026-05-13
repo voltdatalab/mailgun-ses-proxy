@@ -133,13 +133,12 @@ describe('Issue 4: Invalid messages deleted from SQS', () => {
     vi.resetModules()
   })
 
-  it('should delete message with missing MessageAttributes from SQS', async () => {
-    const mockSqsSend = vi.fn().mockResolvedValue({})
+  it('should resolve cleanly (not throw) for message with missing MessageAttributes', async () => {
     vi.doMock('@aws-sdk/client-sesv2', () => ({
       SendEmailCommand: vi.fn(),
     }))
     vi.doMock('@/service/aws/awsHelper', () => ({
-      sqsClient: () => ({ send: mockSqsSend }),
+      sqsClient: () => ({ send: vi.fn() }),
       sesNewsletterClient: () => ({ send: vi.fn() }),
       QUEUE_URL: { NEWSLETTER: 'https://sqs.example.com/newsletter' },
     }))
@@ -165,19 +164,17 @@ describe('Issue 4: Invalid messages deleted from SQS', () => {
       // Missing MessageAttributes
     } as any
 
-    await validateAndSend(message)
-
-    // Message should have been deleted from SQS despite being invalid
-    expect(mockSqsSend).toHaveBeenCalled()
+    // Handler must resolve (not throw) so the worker can delete the message.
+    // Deletion is the worker's responsibility, not the handler's.
+    await expect(validateAndSend(message)).resolves.toBeUndefined()
   })
 
-  it('should delete message with missing siteId attribute from SQS', async () => {
-    const mockSqsSend = vi.fn().mockResolvedValue({})
+  it('should resolve cleanly (not throw) for message with missing siteId attribute', async () => {
     vi.doMock('@aws-sdk/client-sesv2', () => ({
       SendEmailCommand: vi.fn(),
     }))
     vi.doMock('@/service/aws/awsHelper', () => ({
-      sqsClient: () => ({ send: mockSqsSend }),
+      sqsClient: () => ({ send: vi.fn() }),
       sesNewsletterClient: () => ({ send: vi.fn() }),
       QUEUE_URL: { NEWSLETTER: 'https://sqs.example.com/newsletter' },
     }))
@@ -206,8 +203,8 @@ describe('Issue 4: Invalid messages deleted from SQS', () => {
       },
     } as any
 
-    await validateAndSend(message)
-    expect(mockSqsSend).toHaveBeenCalled()
+    // Handler must resolve (not throw) so the worker can delete the message.
+    await expect(validateAndSend(message)).resolves.toBeUndefined()
   })
 })
 
