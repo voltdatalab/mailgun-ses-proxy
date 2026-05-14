@@ -186,7 +186,6 @@ export default function TransactionalPage() {
                                         <div className="flex items-center">From <SortIcon column="fromEmail" /></div>
                                     </TableHead>
                                     <TableHead className="text-center">Status</TableHead>
-                                    <TableHead className="text-center">Last Event</TableHead>
                                     <TableHead className="text-center">Events</TableHead>
                                     <TableHead className="cursor-pointer select-none text-right" onClick={() => handleSort("created")}>
                                         <div className="flex items-center justify-end">Sent <SortIcon column="created" /></div>
@@ -205,17 +204,6 @@ export default function TransactionalPage() {
                                         </TableCell>
                                         <TableCell className="max-w-[200px] truncate">{mail.toEmail}</TableCell>
                                         <TableCell className="max-w-[180px] truncate text-muted-foreground">{mail.fromEmail}</TableCell>
-                                        <TableCell className="text-center">
-                                            <Badge
-                                                variant="outline"
-                                                className={cn(
-                                                    "capitalize px-2 py-0.5 text-[10px] font-semibold border-none",
-                                                    statusStyles[mail.status] || "bg-muted text-muted-foreground",
-                                                )}
-                                            >
-                                                {mail.status}
-                                            </Badge>
-                                        </TableCell>
                                         <TableCell className="text-center">
                                             {mail.lastEventType ? (
                                                 <Badge
