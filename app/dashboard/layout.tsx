@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { Activity, ChevronRight, LayoutDashboard, LogOut, Mail, Menu, Settings } from "lucide-react"
+import { Activity, ChevronRight, LayoutDashboard, LogOut, Mail, Menu, Send, Settings } from "lucide-react"
 import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
 import "./dashboard.css"
@@ -11,6 +11,7 @@ import { SessionContext, UserSession } from "./session-context"
 const navItems = [
     { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
     { href: "/dashboard/newsletters", label: "Newsletters", icon: Mail },
+    { href: "/dashboard/transactional", label: "Transactional", icon: Send },
     { href: "/dashboard/events", label: "Events", icon: Activity },
     { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ]
