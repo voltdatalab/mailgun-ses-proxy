@@ -1,6 +1,10 @@
 /**
  * In-process worker heartbeat registry.
  * Shared between worker loops and the dashboard API route (same Node.js process).
+ *
+ * Stored on `globalThis` so that the server.ts entry point (which calls
+ * registerWorker / heartbeat) and the Next.js API route bundle (which calls
+ * getWorkerStatuses) both reference the exact same Map instance.
  */
 
 export interface WorkerStatus {
@@ -12,12 +16,20 @@ export interface WorkerStatus {
     lastError: string | null
 }
 
-// Module-level singleton — persists across API requests in the same process.
-const registry = new Map<string, WorkerStatus>()
+// Use a Symbol on globalThis so the Map survives Next.js re-bundling.
+const REGISTRY_KEY = Symbol.for("mailgun-ses-proxy:worker-registry")
+
+function getRegistry(): Map<string, WorkerStatus> {
+    const g = globalThis as Record<symbol, unknown>
+    if (!g[REGISTRY_KEY]) {
+        g[REGISTRY_KEY] = new Map<string, WorkerStatus>()
+    }
+    return g[REGISTRY_KEY] as Map<string, WorkerStatus>
+}
 
 /** Registers a worker at loop start. */
 export function registerWorker(name: string): void {
-    registry.set(name, {
+    getRegistry().set(name, {
         name,
         lastHeartbeat: null,
         alive: false,
@@ -29,7 +41,7 @@ export function registerWorker(name: string): void {
 
 /** Called on every successful poll iteration (idle or with messages). */
 export function heartbeat(name: string): void {
-    const entry = registry.get(name)
+    const entry = getRegistry().get(name)
     if (!entry) return
     entry.lastHeartbeat = Date.now()
     entry.alive = true
@@ -39,7 +51,7 @@ export function heartbeat(name: string): void {
 
 /** Marks a worker as dead and stores the last error. */
 export function markWorkerDead(name: string, error: unknown): void {
-    const entry = registry.get(name)
+    const entry = getRegistry().get(name)
     if (!entry) return
     entry.alive = false
     entry.lastError = error instanceof Error ? error.message : String(error)
@@ -52,7 +64,7 @@ export function markWorkerDead(name: string, error: unknown): void {
  */
 export function getWorkerStatuses(staleThresholdMs = 60_000): WorkerStatus[] {
     const now = Date.now()
-    return Array.from(registry.values()).map((w) => ({
+    return Array.from(getRegistry().values()).map((w) => ({
         ...w,
         alive:
             w.alive &&
