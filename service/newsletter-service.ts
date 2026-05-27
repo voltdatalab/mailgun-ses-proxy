@@ -16,7 +16,7 @@ import {
     shouldPersistNewsletterFormattedContents,
 } from "./database/db"
 
-const log = logger.child({ service: "service:newsletter-service" })
+const log = logger.child({ module: "service:newsletter-service" })
 const PERSIST_FORMATTED_CONTENTS = shouldPersistNewsletterFormattedContents()
 
 // ─── Public API ──────────────────────────────────────────────

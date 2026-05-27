@@ -69,18 +69,22 @@ export function shouldPersistNewsletterFormattedContents() {
     return PERSIST_NEWSLETTER_FORMATTED_CONTENTS
 }
 
-export function saveNewsletterNotification(event: NotificationEvent) {
-    const data = {
+function prepareNotificationData(event: NotificationEvent) {
+    return {
         messageId: event.messageId,
         rawEvent: event.raw,
         type: event.type,
         notificationId: event.notificationId,
         timestamp: event.timestamp,
     }
+}
+
+export function saveNewsletterNotification(event: NotificationEvent) {
+    const data = prepareNotificationData(event)
     return prisma.newsletterNotifications.upsert({
         where: { notificationId: event.notificationId },
         create: data,
-        update: data, // In case of re-delivery, we just overwrite with same data
+        update: data,
     })
 }
 
@@ -112,14 +116,8 @@ export async function getNewsletterContent(newsletterBatchId: string) {
     }
 }
 
-export async function saveSystemEmailEvent(event: NotificationEvent) {
-    const data = {
-        messageId: event.messageId,
-        rawEvent: event.raw,
-        type: event.type,
-        notificationId: event.notificationId,
-        timestamp: event.timestamp,
-    }
+export function saveSystemEmailEvent(event: NotificationEvent) {
+    const data = prepareNotificationData(event)
     return prisma.systemMailNotifications.upsert({
         where: { notificationId: event.notificationId },
         create: data,

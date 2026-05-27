@@ -1,4 +1,4 @@
-import pino from 'pino';
+import pino from 'pino'
 
 function resolveLogLevel() {
     const envLevel = process.env.LOG_LEVEL
@@ -9,6 +9,6 @@ function resolveLogLevel() {
 const logger = pino(
     { level: resolveLogLevel() },
     pino.destination({ sync: true })
-);
+)
 
-export default logger.child({ app: "mailgun-ses-proxy" });
+export default logger.child({ app: "mailgun-ses-proxy" })
