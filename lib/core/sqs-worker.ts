@@ -23,6 +23,25 @@ const POLL_BACKOFF_MAX_MS = 30_000
 // bring it back with backoff.
 const MAX_CONSECUTIVE_ERRORS = 50
 
+// Graceful-shutdown flag. When set, all workers finish their current iteration
+// and then exit the poll loop so in-flight work can complete before the
+// process terminates.
+let _shutdownRequested = false
+
+/**
+ * Signal all workers to stop polling after the current iteration.
+ * In-flight handler calls are allowed to complete.
+ */
+export function requestShutdown(): void {
+    _shutdownRequested = true
+    log.info("Shutdown requested — workers will drain after current iteration")
+}
+
+/** Visible for testing. */
+export function _isShutdownRequested(): boolean {
+    return _shutdownRequested
+}
+
 interface WorkerConfig {
     name: string
     queueUrl: string
@@ -70,7 +89,7 @@ export async function startWorker(config: WorkerConfig) {
     let consecutiveErrors = 0
 
     try {
-        while (true) {
+        while (!_shutdownRequested) {
             try {
                 let messages: Message[] | undefined
                 try {
@@ -91,6 +110,8 @@ export async function startWorker(config: WorkerConfig) {
                     continue
                 }
 
+                let anyHandlerSuccess = false
+
                 for (const message of messages) {
                     const receiveCount = parseInt(
                         message.Attributes?.ApproximateReceiveCount ?? "0",
@@ -109,6 +130,7 @@ export async function startWorker(config: WorkerConfig) {
                     try {
                         await handler(message)
                         await deleteMessage(client, queueUrl, message)
+                        anyHandlerSuccess = true
                     } catch (handlerError) {
                         log.error(
                             { name, messageId: message.MessageId, receiveCount, err: handlerError },
@@ -117,8 +139,19 @@ export async function startWorker(config: WorkerConfig) {
                     }
                 }
 
-                heartbeat(name)
-                consecutiveErrors = 0
+                // Only consider the poll healthy if at least one handler
+                // succeeded. If every message failed (e.g. DB down), the
+                // worker should not mask the failure behind a heartbeat.
+                if (anyHandlerSuccess) {
+                    heartbeat(name)
+                    consecutiveErrors = 0
+                } else {
+                    consecutiveErrors++
+                    log.warn(
+                        { name, consecutiveErrors },
+                        "All messages in batch failed — incrementing error counter"
+                    )
+                }
             } catch (loopError) {
                 consecutiveErrors++
                 log.error(
@@ -137,6 +170,10 @@ export async function startWorker(config: WorkerConfig) {
                 pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
             }
         }
+
+        // Clean exit — shutdown was requested
+        log.info({ name }, `Worker ${name} stopped (shutdown requested)`)
+        markWorkerDead(name, "graceful shutdown")
     } catch (fatalError) {
         // Belt-and-suspenders: if something escapes all inner catches, log and exit.
         log.error({ name, err: fatalError }, "Fatal error escaped worker loop")

@@ -1,7 +1,7 @@
-import { MailgunMessage } from "../../types/mailgun"
 import { NotificationEvent } from "../../lib/core/aws-utils"
 import { safeStringify } from "../../lib/core/common"
 import { prisma } from "../../lib/database"
+import { MailgunMessage } from "../../types/mailgun"
 export { prisma }
 
 function getEnvBoolean(name: string, fallback = false) {
@@ -100,7 +100,16 @@ export async function getNewsletterContent(newsletterBatchId: string) {
         where: { id: newsletterBatchId },
         select: { contents: true }
     })
-    return result && result.contents ? JSON.parse(result.contents) : null
+
+    if (!result || !result.contents) return null
+
+    try {
+        return JSON.parse(result.contents)
+    } catch (err) {
+        throw new Error(
+            `Failed to parse newsletter batch contents (batchId=${newsletterBatchId}): ${err instanceof Error ? err.message : err}`
+        )
+    }
 }
 
 export async function saveSystemEmailEvent(event: NotificationEvent) {
