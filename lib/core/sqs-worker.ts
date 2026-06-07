@@ -90,6 +90,11 @@ export async function startWorker(config: WorkerConfig) {
 
     try {
         while (!_shutdownRequested) {
+            // Yield to the event loop between iterations so that DNS refresh,
+            // DB connection keepalives, GC, and timer callbacks can execute.
+            // Without this, sync I/O (logging) starves the loop after ~20K iterations.
+            await new Promise(resolve => setImmediate(resolve))
+
             try {
                 let messages: Message[] | undefined
                 try {

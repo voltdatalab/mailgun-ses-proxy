@@ -7,6 +7,7 @@ import logger from "./lib/core/logger"
 
 import { processNewsletterEventsQueue, processNewsletterQueue, processSystemEventsQueue } from "./service/background-process"
 import { requestShutdown } from "./lib/core/sqs-worker"
+import { flushLogger } from "./lib/core/logger"
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 // Prevent silent crashes from stray promise rejections or uncaught exceptions.
@@ -32,6 +33,7 @@ function initiateShutdown(signal: string) {
     if (shutdownInProgress) return
     shutdownInProgress = true
     logger.info({ signal }, `${signal} received — draining workers (grace ${SHUTDOWN_GRACE_MS}ms)`)
+    flushLogger()
     requestShutdown()
 
     // Hard-stop fallback: if workers don't finish within the grace period,
