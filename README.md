@@ -120,8 +120,11 @@ mail__from="noreply@your-verified-ses-domain.com"
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/v3/{siteId}/messages` | `POST` | The Mailgun-compatible mailer. |
-| `/healthcheck` | `GET` | Returns system status. |
+| `/healthcheck` | `GET` | Unauthenticated CapRover health probe; returns only `status`, `ready`, `degraded`, and `timestamp`. |
+| `/ops/health` | `GET` | Authenticated (Basic API key) detailed worker, queue-backlog, and telemetry health. Do not expose this route publicly. |
 | `/stats/{action}` | `GET` | Retrieve delivery/bounce analytics. |
+
+Queue telemetry uses cached `GetQueueAttributes` samples. Each worker samples immediately at startup and periodically thereafter (including while a long-running handler is in flight), without coupling telemetry failures to message delivery.
 
 ---
 

@@ -1,6 +1,6 @@
 import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs'
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { buildQueueAttributesInput, normalizeTelemetrySampleInterval, observedMessageAgeMs, sampleQueueTelemetry } from '@/lib/core/sqs-worker'
+import { buildQueueAttributesInput, clearQueueTelemetrySampling, normalizeTelemetrySampleInterval, observedMessageAgeMs, sampleQueueTelemetry, startQueueTelemetrySampling } from '@/lib/core/sqs-worker'
 import { getWorkerStatuses, registerWorker, resetWorkerRegistryForTests } from '@/lib/core/worker-registry'
 
 describe('SQS queue telemetry', () => {
@@ -31,5 +31,32 @@ describe('SQS queue telemetry', () => {
         const now = Date.now()
         expect(observedMessageAgeMs([{ Attributes: { SentTimestamp: String(now + 5_000) } }])).toBe(0)
         expect(observedMessageAgeMs([{ Attributes: { SentTimestamp: String(now - 2_000) } }, { Attributes: { SentTimestamp: 'bad' } }])).toBeGreaterThanOrEqual(2_000)
+    })
+    it('continues periodic sampling while a handler promise is still in flight, then clears the timer', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+        registerWorker('newsletter-sender')
+        const send = vi.fn().mockResolvedValue({ Attributes: {
+            ApproximateNumberOfMessages: '0', ApproximateNumberOfMessagesNotVisible: '0', ApproximateNumberOfMessagesDelayed: '0',
+        } })
+        let releaseHandler!: () => void
+        const handlerInFlight = new Promise<void>(resolve => { releaseHandler = resolve })
+
+        startQueueTelemetrySampling({ send } as any, 'newsletter-sender', 'https://private.queue', 10_000)
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(send).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(handlerInFlight).toBeInstanceOf(Promise)
+        expect(send).toHaveBeenCalledTimes(2)
+        expect(getWorkerStatuses()[0].queue.sampledAt).toBe(Date.now())
+
+        clearQueueTelemetrySampling('newsletter-sender')
+        vi.advanceTimersByTime(20_000)
+        await vi.runAllTicks()
+        expect(send).toHaveBeenCalledTimes(2)
+        releaseHandler()
+        await handlerInFlight
+        vi.useRealTimers()
     })
 })

@@ -21,11 +21,13 @@ const MAX_TELEMETRY_SAMPLE_INTERVAL_MS = 5 * 60_000
 let _shutdownRequested = false
 const telemetryRequests = new Set<string>()
 const telemetryLastSample = new Map<string, number>()
+const telemetryTimers = new Map<string, ReturnType<typeof setInterval>>()
 const activePollControllers = new Set<AbortController>()
 
 export function requestShutdown(): void {
     _shutdownRequested = true
     for (const controller of activePollControllers) controller.abort()
+    clearAllQueueTelemetrySampling()
     log.info("Shutdown requested — active polls aborted and in-flight handlers will drain")
 }
 
@@ -38,6 +40,7 @@ export function _isShutdownRequested(): boolean {
 export function _resetShutdownForTests(): void {
     _shutdownRequested = false
     activePollControllers.clear()
+    clearAllQueueTelemetrySampling()
 }
 
 export interface WorkerConfig {
@@ -94,10 +97,36 @@ function parseSqsCount(value: string | undefined): number | null {
 /** Starts sampling without coupling a slow/failing attributes call to ACK delivery. */
 function launchQueueTelemetrySample(client: ReturnType<typeof sqsClient>, name: string, queueUrl: string, intervalMs: number): void {
     const now = Date.now()
-    if (telemetryRequests.has(name) || now - (telemetryLastSample.get(name) ?? 0) < intervalMs) return
+    const lastSample = telemetryLastSample.get(name)
+    if (telemetryRequests.has(name) || (lastSample !== undefined && now - lastSample < intervalMs)) return
     telemetryLastSample.set(name, now)
     telemetryRequests.add(name)
-    void sampleQueueTelemetry(client, name, queueUrl).finally(() => telemetryRequests.delete(name))
+    // The sampler itself isolates AWS failures; this guard also prevents an
+    // unexpected registry/logging failure from becoming an unhandled rejection.
+    void sampleQueueTelemetry(client, name, queueUrl).catch(error => {
+        log.warn({ name, errorClass: errorClass(error) }, "Unexpected SQS queue telemetry sampler failure")
+    }).finally(() => telemetryRequests.delete(name))
+}
+
+/** Starts one uncoupled sampler per worker, including during handler awaits. */
+export function startQueueTelemetrySampling(client: ReturnType<typeof sqsClient>, name: string, queueUrl: string, intervalMs: number): void {
+    clearQueueTelemetrySampling(name)
+    telemetryLastSample.delete(name)
+    launchQueueTelemetrySample(client, name, queueUrl, intervalMs)
+    const timer = setInterval(() => launchQueueTelemetrySample(client, name, queueUrl, intervalMs), intervalMs)
+    timer.unref?.()
+    telemetryTimers.set(name, timer)
+}
+
+export function clearQueueTelemetrySampling(name: string): void {
+    const timer = telemetryTimers.get(name)
+    if (timer) clearInterval(timer)
+    telemetryTimers.delete(name)
+    telemetryLastSample.delete(name)
+}
+
+function clearAllQueueTelemetrySampling(): void {
+    for (const name of telemetryTimers.keys()) clearQueueTelemetrySampling(name)
 }
 
 export function observedMessageAgeMs(messages: Message[]): number | null {
@@ -220,13 +249,13 @@ export async function startWorker(config: WorkerConfig) {
     const telemetryIntervalMs = normalizeTelemetrySampleInterval(
         telemetrySampleIntervalMs ?? Number(process.env.SQS_TELEMETRY_SAMPLE_INTERVAL_MS),
     )
+    startQueueTelemetrySampling(client, name, queueUrl, telemetryIntervalMs)
     let pollBackoffMs = POLL_BACKOFF_MIN_MS
     let consecutiveErrors = 0
 
     try {
         while (!_shutdownRequested) {
             await new Promise(resolve => setImmediate(resolve))
-            launchQueueTelemetrySample(client, name, queueUrl, telemetryIntervalMs)
             try {
                 let messages: Message[] | undefined
                 try {
@@ -296,6 +325,8 @@ export async function startWorker(config: WorkerConfig) {
         log.error({ name, errorClass: errorClass(fatalError) }, "Fatal error escaped worker loop")
         markWorkerDead(name, fatalError)
         throw fatalError
+    } finally {
+        clearQueueTelemetrySampling(name)
     }
 }
 

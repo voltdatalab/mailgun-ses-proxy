@@ -16,7 +16,7 @@ export async function proxy(request: NextRequest) {
     const { pathname } = request.nextUrl
 
     // 1. Whitelist / Healthchecks
-    if (WHITELIST.some(path => pathname.startsWith(path))) {
+    if (WHITELIST.some(path => pathname === path)) {
         return NextResponse.next()
     }
 
