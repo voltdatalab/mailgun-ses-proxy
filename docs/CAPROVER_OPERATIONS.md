@@ -48,7 +48,7 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 
 ### Persistência opcional de conteúdo formatado de newsletters
 
-- `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` (opcional): aceita somente `true` ou `false`; o padrão é `false`.
+- `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` (opcional): valores `1`, `true`, `yes` ou `on`, sem distinção entre maiúsculas e minúsculas, ativam a persistência; `false`, vazio ou qualquer outro valor a desativam (padrão: `false`).
 
 Quando definido como `true`, o serviço persiste conteúdos formatados completos de newsletters para auditoria. Isso pode ampliar a exposição de dados pessoais/conteúdo, o volume do banco e o período de retenção que precisa ser protegido, monitorado e removido conforme a política aplicável. Mantenha `false` salvo quando essa persistência for explicitamente necessária e houver uma política de retenção e controles de privacidade aprovados.
 
