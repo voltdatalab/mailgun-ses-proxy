@@ -26,7 +26,9 @@ export function createEventProcessor(config: EventProcessorConfig) {
         const result = parseNotificationEvent(message.MessageId, message.Body)
 
         if (!result.isNewsletterEmailEvent && !result.isTransactionalEmailEvent) {
-            log.warn({ name, messageId: result.messageId }, "Untracked event — discarding")
+            // A syntactically valid but untracked event is intentionally resolved,
+            // so the SQS worker may ACK it. Failures still remain queue-owned.
+            log.warn({ name, messageId: result.messageId }, "Untracked event — acknowledging")
             return
         }
 

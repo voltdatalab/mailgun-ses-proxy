@@ -33,8 +33,8 @@ The system implements a multi-layered approach to prevent duplicates and handle 
 1. **SQS Visibility Timeout (900s)**: Ensures large batches have enough time to process before SQS attempts re-delivery.
 2. **Idempotency Check**: Before every send, `checkNewsletterAlreadySent()` verifies the `(batchId, toEmail)` tuple in the DB.
 3. **Upsert for Events**: Notification events use `upsert` logic to remain idempotent on SQS re-deliveries.
-4. **Retry Limits (3)**: The generic worker and event processor automatically discard messages that exceed 3 retry attempts to prevent infinite loops.
-5. **Worker Isolation**: All background tasks use `lib/core/sqs-worker.ts` for consistent error isolation and message lifecycle management.
+4. **Queue-owned retries and redrive**: A handler failure is not manually ACKed or discarded by the app; SQS visibility timeout, redrive policy, and DLQ own retries and terminal handling. Valid untracked events may resolve and ACK intentionally. Configure a DLQ for every relevant queue before promotion.
+5. **Worker Isolation**: All background tasks use `lib/core/sqs-worker.ts` for consistent error isolation, supervision, and message lifecycle management.
 
 ### Key Services & Utilities
 - `lib/core/sqs-worker.ts` — Generic SQS polling utility used by all background tasks.

@@ -10,7 +10,7 @@
 
 Esta integração usa o Método 3: o CapRover lê o `captain-definition` na raiz e constrói a aplicação a partir do Dockerfile indicado por `dockerfilePath`. O manifesto mínimo aponta para `dockerfile`; não introduz override de imagem, compose, nem configuração adicional de porta.
 
-O processo HTTP em runtime escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`), e o Dockerfile declara `EXPOSE 3000` para refletir esse runtime. Configure a porta HTTP interna da app como `3000` no CapRover. A verificação de saúde é `GET /healthcheck`; o endpoint responde `200` enquanto os workers registrados estiverem saudáveis e `503` caso algum worker registrado esteja inativo.
+O processo HTTP em runtime escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`), e o Dockerfile declara `EXPOSE 3000` para refletir esse runtime. Configure a porta HTTP interna da app como `3000` no CapRover; não use 8080. A verificação pública é `GET /healthcheck`: ela retorna exclusivamente `status`, `ready`, `degraded` e `timestamp`, com `200` quando ready e `503` quando não ready. Detalhes de workers e backlog existem somente no endpoint autenticado `GET /ops/health`.
 
 ## Configuração de ambiente
 
@@ -77,9 +77,11 @@ plataforma (`SHUTDOWN_GRACE_MS`). Mensagens sem ACK permanecem não confirmadas 
 ficam disponíveis para retry e, quando aplicável, redrive pela política da
 fila.
 
-### Health interno e telemetria SQS cacheada
+### Health público mínimo e telemetria SQS autenticada
 
-`GET /healthcheck` é exclusivamente um endpoint operacional **interno**: mantenha-o acessível somente pela rede/proxy interno do CapRover e nunca o publique para a Internet. Ele não consulta SQS por requisição; mostra snapshots cacheados dos três workers esperados (`newsletter-sender`, `newsletter-events`, `system-events`) e apenas campos seguros: liveness/idade de heartbeat, contadores agregados, idade observada de mensagem e profundidades SQS `visible`, `notVisible` e `delayed`.
+`GET /healthcheck` é o probe público mínimo do CapRover. Ele não requer Basic Auth e expõe exatamente `status`, `ready`, `degraded` e `timestamp`; não inclui workers, backlog, telemetria SQS ou outros detalhes operacionais. Configure o probe da plataforma para esse caminho.
+
+`GET /ops/health` exige Basic Auth com a API key e é o endpoint operacional que mostra snapshots cacheados dos três workers esperados (`newsletter-sender`, `newsletter-events`, `system-events`), liveness/idade de heartbeat, contadores agregados, idade observada de mensagem e profundidades SQS `visible`, `notVisible` e `delayed`. Não o publique: mantenha-o acessível somente pela rede/proxy administrativo controlado.
 
 Cada worker solicita `GetQueueAttributes` no startup/primeiro poll e, no máximo, a cada `SQS_TELEMETRY_SAMPLE_INTERVAL_MS` (padrão **30000**, limitado a 10000–300000 ms). A role AWS precisa de `sqs:GetQueueAttributes` além das permissões de consumo já necessárias. Falhar essa amostra não interrompe receive, handler ou ACK e registra/expõe somente `telemetryErrorClass`, jamais URL da fila, corpo, destinatário, ReceiptHandle, mensagem/stack de erro ou payload.
 
@@ -128,7 +130,7 @@ A migração `20260721120000_add_ghost_analytics_indexes` lê `information_schem
 
 Se qualquer nome esperado já existir com definição incompatível, o preflight global dos dois índices bloqueia explicitamente antes de qualquer DDL da migração, em vez de mascarar o drift ou deixar aplicação parcial. O diagnóstico usa um sentinela fixo de `information_schema`, sem interpolar metadados observados. Não acrescentar `ALGORITHM` ou `LOCK` sem validação específica do motor/versão.
 
-A conclusão local/estática desta mudança não substitui validação contra banco real: a Task 12/14 exige que, antes da Task 14, o workflow GitHub Actions `ci` esteja verde nos jobs `mysql` (MySQL 8.0) e `mariadb` (MariaDB 11.4). Eles executam `prisma migrate deploy` em banco limpo, toda a suíte com `runPrismaTests=true` e relatório JSON que falha para testes pending/skipped ou failed. Os mesmos jobs executam os três cenários isolados da migração: criação limpa das assinaturas exatas, no-op para nomes legados equivalentes e abort global quando o segundo nome esperado é incompatível. A CI também executa `EXPLAIN` especificamente para `event=delivered OR opened` (além das consultas de tipo único), registra o plano antes de produção e aceita que o OR possa exigir filesort/merge apesar de usar o índice. Não há alteração de índice ou schema nesta tarefa. Antes de produção, confirme que a migração foi registrada, que os índices ou seus equivalentes legados válidos existem, e que a aplicação/Ghost continuam funcionais antes da promoção.
+A conclusão local/estática desta mudança não substitui validação contra banco real: a Task 12/14 exige que, antes da Task 14, o workflow GitHub Actions `ci` esteja verde nos jobs `mysql` (MySQL 8.0) e `mariadb` (MariaDB 11.4). Eles executam `prisma migrate deploy` em banco limpo, toda a suíte com `runPrismaTests=true` e relatório JSON que falha para testes pending/skipped ou failed. Os mesmos jobs executam os três cenários isolados da migração: criação limpa das assinaturas exatas, no-op para nomes legados equivalentes e abort global quando o segundo nome esperado é incompatível. A CI também executa `EXPLAIN` especificamente para `event=delivered OR opened` (além das consultas de tipo único), registra o plano antes de produção e aceita que o OR possa exigir filesort/merge apesar de usar o índice. Esta candidata **inclui** uma migração aditiva de índices/schema; antes de produção, confirme que ela foi registrada, que os índices ou seus equivalentes legados válidos existem, e que a aplicação/Ghost continuam funcionais antes da promoção.
 
 ## Paginação de analytics Ghost/Mailgun
 

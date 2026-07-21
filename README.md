@@ -104,14 +104,19 @@ Fill in your `AWS_ACCESS_KEY_ID`, `DATABASE_URL`, and queue URLs. (See `.env.dev
 Update your Ghost `config.production.json` or Environment Variables:
 
 ```bash
-# Mailgun API URL (Point to your proxy)
-bulkEmail__mailgun__baseUrl="http://your-proxy-ip:3000/v3"
+# CapRover: use the internal service DNS; do not publish the container port.
+bulkEmail__mailgun__baseUrl="http://srv-captain--nucleo-ses-proxy:3000/v3"
+# Generic CapRover form: http://srv-captain--<app>:3000/v3
 bulkEmail__mailgun__apiKey="your-secure-api-key"
 bulkEmail__mailgun__domain="your-verified-ses-domain.com"
 
 # General Email
 mail__from="noreply@your-verified-ses-domain.com"
 ```
+
+For a non-CapRover deployment, point Ghost at the private/reverse-proxied URL
+of the proxy (for example, `http://your-private-proxy:3000/v3`). Do not expose
+the container port solely for Ghost integration.
 
 ---
 
