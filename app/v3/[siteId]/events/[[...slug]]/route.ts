@@ -6,6 +6,25 @@ import { NextRequest } from "next/server"
 const log = logger.child({ module: "app/v3/events" })
 type pathParam = { params: Promise<{ siteId: string, slug?: string[] }> }
 
+function publicRequestUrl(req: NextRequest) {
+    const forwardedHost = req.headers.get("x-forwarded-host")?.split(",", 1)[0]?.trim()
+    const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",", 1)[0]?.trim().toLowerCase()
+    if (!forwardedHost || (forwardedProto !== "http" && forwardedProto !== "https")) return req.url
+    if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(forwardedHost)) return req.url
+
+    try {
+        const origin = new URL(`${forwardedProto}://${forwardedHost}`)
+        if (origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) return req.url
+        const url = new URL(req.url)
+        url.protocol = origin.protocol
+        url.hostname = origin.hostname
+        url.port = origin.port
+        return url.toString()
+    } catch {
+        return req.url
+    }
+}
+
 /**
  * GET /api/v3/events/{siteId}/{...slug}
  * 
@@ -23,7 +42,7 @@ async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
     const { siteId } = await params
     try {
         const queryParams = validateQueryParams(req.nextUrl.searchParams)
-        const events = await fetchAnalyticsEvents(queryParams, siteId, req.url)
+        const events = await fetchAnalyticsEvents(queryParams, siteId, publicRequestUrl(req))
         log.debug({ count: events.items.length }, "analytics events count")
         return Response.json(events, { status: 200 })
     } catch (e) {
