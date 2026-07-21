@@ -121,7 +121,7 @@ A conclusão local/estática desta mudança não substitui validação contra ba
 
 ## Paginação de analytics Ghost/Mailgun
 
-`GET /v3/{siteId}/events` mantém o formato Mailgun `{items, paging: {next}}`. A primeira chamada aceita o `start` numérico legado (inteiro maior ou igual a zero), mas o link `paging.next` remove esse offset e inclui um cursor opaco URL-safe. Ghost deve seguir esse link sem reconstruí-lo: ele preserva `event`, `begin`, `end`, `limit`, `ascending` e filtros compatíveis adicionais. O cursor usa a ordem estável `(created, id)` e impede lacunas ou duplicações quando vários eventos possuem o mesmo `created`.
+`GET /v3/{siteId}/events` mantém o formato Mailgun `{items, paging: {next}}`. A primeira chamada aceita o `start` numérico legado (inteiro maior ou igual a zero). Quando essa página retorna itens, o link `paging.next` remove o offset e inclui um cursor opaco URL-safe; se a página legada estiver vazia, mantém o mesmo `start`, sem cursor, para não reiniciar no offset zero. Ghost deve seguir esse link sem reconstruí-lo: ele preserva `event`, `begin`, `end`, `limit`, `ascending` e filtros compatíveis adicionais. O cursor usa a ordem estável `(created, id)` e impede lacunas ou duplicações quando vários eventos possuem o mesmo `created`.
 
 Os parâmetros são validados estritamente: `limit` é inteiro entre 1 e 300 (padrão 300), `begin` e `end` são inteiros finitos com `begin < end`, e `ascending` aceita apenas `yes`, `true` ou `1` para ordem ascendente; ausente, `no`, `false` ou `0` usam ordem descendente. Um cursor inválido ou incompatível com a ordem retorna `400` sem expor detalhes internos. Uma página vazia mantém um `paging.next` determinístico, sem avançar cursor; Ghost pode encerrar a leitura ao receber `items` vazio.
 
