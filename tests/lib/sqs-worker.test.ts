@@ -2,6 +2,8 @@ import { DeleteMessageBatchCommand, type Message } from '@aws-sdk/client-sqs'
 import { describe, expect, it, vi } from 'vitest'
 import {
     buildReceiveInput,
+    isHealthySqsPoll,
+    normalizeSqsWorkerCount,
     processSqsMessage,
     processSqsMessages,
 } from '@/lib/core/sqs-worker'
@@ -17,10 +19,39 @@ function message(id: string, receiveCount = '1', receipt = `receipt-${id}`): Mes
 }
 
 describe('SQS receive batching', () => {
-    it('uses the configured batch size and clamps it to SQS limits', () => {
+    it.each([
+        [0, 1],
+        [-3, 1],
+        [12, 10],
+        [2.9, 2],
+        [Number.NaN, 1],
+        [Number.POSITIVE_INFINITY, 1],
+    ])('normalizes batch and concurrency values %s to %s', (input, expected) => {
+        // The same normalizer is used for ReceiveMessage batching and handler concurrency.
+        expect(normalizeSqsWorkerCount(input)).toBe(expected)
+        expect(buildReceiveInput(queueUrl, 30, 20, input).MaxNumberOfMessages).toBe(expected)
+    })
+
+    it('uses the configured batch size and preserves its long-poll wait', () => {
         expect(buildReceiveInput(queueUrl, 30, 20, 7).MaxNumberOfMessages).toBe(7)
-        expect(buildReceiveInput(queueUrl, 30, 20, 0).MaxNumberOfMessages).toBe(1)
-        expect(buildReceiveInput(queueUrl, 30, 20, 99).MaxNumberOfMessages).toBe(10)
+        expect(buildReceiveInput(queueUrl, 30, 17, 1).WaitTimeSeconds).toBe(17)
+    })
+})
+
+describe('SQS poll health policy', () => {
+    it('treats empty long-polls as healthy without dispatching handlers or deletes', async () => {
+        const send = vi.fn()
+        const handler = vi.fn()
+
+        expect(isHealthySqsPoll([], 0)).toBe(true)
+        await expect(processSqsMessages({ send } as any, queueUrl, [], handler)).resolves.toBe(0)
+        expect(handler).not.toHaveBeenCalled()
+        expect(send).not.toHaveBeenCalled()
+    })
+
+    it('requires an acknowledgement for a non-empty poll to be healthy', () => {
+        expect(isHealthySqsPoll([message('one')], 0)).toBe(false)
+        expect(isHealthySqsPoll([message('one')], 1)).toBe(true)
     })
 })
 
@@ -96,9 +127,11 @@ describe('processSqsMessages', () => {
     it('reports zero acknowledgements when the batch delete request fails', async () => {
         const send = vi.fn().mockRejectedValue(new Error('SQS batch delete failed'))
 
-        await expect(processSqsMessages(
+        const acknowledged = await processSqsMessages(
             { send } as any, queueUrl, [message('one')], vi.fn().mockResolvedValue(undefined), 10,
-        )).resolves.toBe(0)
+        )
+        expect(acknowledged).toBe(0)
+        expect(isHealthySqsPoll([message('one')], acknowledged)).toBe(false)
     })
 })
 

@@ -38,9 +38,21 @@ export interface WorkerConfig {
     handler: (message: Message) => Promise<void>
 }
 
-function boundedSqsBatchSize(value: number | undefined): number {
+/**
+ * Normalizes SQS receive and handler-pool sizes to the service's 1..10 range.
+ * Non-finite values intentionally fall back to the safe single-message mode.
+ */
+export function normalizeSqsWorkerCount(value: number | undefined): number {
     const numeric = Number.isFinite(value) ? Math.floor(value!) : 1
     return Math.min(SQS_BATCH_LIMIT, Math.max(1, numeric))
+}
+
+/**
+ * An idle long-poll proves the worker is alive; non-empty polls require a
+ * confirmed acknowledgement before they count as healthy.
+ */
+export function isHealthySqsPoll(messages: Message[] | undefined, acknowledged: number): boolean {
+    return !messages || messages.length === 0 || acknowledged > 0
 }
 
 /** Exported test seam for the exact ReceiveMessageCommand input. */
@@ -52,7 +64,7 @@ export function buildReceiveInput(queueUrl: string, visibilityTimeout: number, w
         MessageSystemAttributeNames: ["SentTimestamp", "ApproximateReceiveCount"] as MessageSystemAttributeName[],
         VisibilityTimeout: visibilityTimeout,
         // SQS permits at most ten messages in a receive request.
-        MaxNumberOfMessages: boundedSqsBatchSize(batchSize),
+        MaxNumberOfMessages: normalizeSqsWorkerCount(batchSize),
         // Preserve long polling; empty responses do not spin the loop.
         WaitTimeSeconds: waitTimeSeconds,
     }
@@ -78,7 +90,7 @@ export async function startWorker(config: WorkerConfig) {
     log.info({ name }, `Starting SQS worker: ${name}`)
     registerWorker(name)
     const receiveInput = buildReceiveInput(queueUrl, visibilityTimeout, waitTimeSeconds, batchSize)
-    const concurrency = boundedSqsBatchSize(maxConcurrency)
+    const concurrency = normalizeSqsWorkerCount(maxConcurrency)
     let pollBackoffMs = POLL_BACKOFF_MIN_MS
     let consecutiveErrors = 0
 
@@ -101,14 +113,14 @@ export async function startWorker(config: WorkerConfig) {
 
                 if (!messages || messages.length === 0) {
                     // ReceiveMessage remains a long-poll request, so this does not busy-loop.
-                    heartbeat(name)
+                    if (isHealthySqsPoll(messages, 0)) heartbeat(name)
                     consecutiveErrors = 0
                     continue
                 }
 
                 const acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
                 // A non-empty poll is healthy only after a confirmed batch-delete entry.
-                if (acknowledged > 0) {
+                if (isHealthySqsPoll(messages, acknowledged)) {
                     heartbeat(name)
                     consecutiveErrors = 0
                 } else {
@@ -177,7 +189,7 @@ async function processWithConcurrency(
 ): Promise<Message[]> {
     const successful: Message[] = []
     let next = 0
-    const workerCount = Math.min(messages.length, boundedSqsBatchSize(maxConcurrency))
+    const workerCount = Math.min(messages.length, normalizeSqsWorkerCount(maxConcurrency))
     await Promise.all(Array.from({ length: workerCount }, async () => {
         while (next < messages.length) {
             const message = messages[next++]
