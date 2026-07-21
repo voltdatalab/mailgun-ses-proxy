@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises"
 import { createConnection } from "mariadb"
 import { serializeExplainEvidence } from "./analytics-explain-evidence.mjs"
+import {
+  aggregateSignatureExists,
+  serializeIndexSignatureEvidence,
+} from "./analytics-index-signature-evidence.mjs"
 
 const migration = await readFile(
   new URL("../prisma/migrations/20260721120000_add_ghost_analytics_indexes/migration.sql", import.meta.url),
@@ -42,7 +46,7 @@ async function assertSignature(schema, table, name, expected) {
   const rows = await signature(schema, table, name)
   const actual = rows[0]
   if (rows.length !== 1 || actual.columns_ !== expected.columns || actual.subParts !== expected.subParts || actual.collations !== expected.collations || Number(actual.nonUnique) !== 1 || actual.indexType !== "BTREE") {
-    throw new Error(`unexpected full index signature for ${table}.${name}: ${JSON.stringify(actual)}`)
+    throw new Error(`unexpected full index signature for ${table}.${name}: ${serializeIndexSignatureEvidence(actual)}`)
   }
 }
 async function seedNotifications(schema) {
@@ -60,7 +64,7 @@ async function explain(schema, sql, label) {
 }
 function assertUsesAnalyticsIndex(plan, label) {
   if (!plan.some((row) => row.key === "idx_notifications_type_created_id")) {
-    throw new Error(`${label} did not use idx_notifications_type_created_id: ${JSON.stringify(plan)}`)
+    throw new Error(`${label} did not use idx_notifications_type_created_id: ${serializeExplainEvidence(plan)}`)
   }
 }
 
@@ -82,7 +86,7 @@ try {
   await applyMigration(schemas[1])
   for (const [table, expected] of [["NewsletterNotifications", "idx_notifications_type_created_id"], ["NewsletterBatch", "NewsletterBatch_siteId_idx"]]) {
     const rows = await connection.query("SELECT COUNT(DISTINCT INDEX_NAME) AS count_ FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY'", [schemas[1], table])
-    if (Number(rows[0].count_) !== 1 || (await signature(schemas[1], table, expected)).length !== 0) throw new Error("legacy equivalent index was duplicated")
+    if (Number(rows[0].count_) !== 1 || aggregateSignatureExists(await signature(schemas[1], table, expected))) throw new Error("legacy equivalent index was duplicated")
   }
 
   await createTables(schemas[2])
@@ -90,7 +94,7 @@ try {
   await connection.query("CREATE INDEX `NewsletterBatch_siteId_idx` ON `NewsletterBatch` (`id`)")
   let aborted = false
   try { await applyMigration(schemas[2]) } catch { aborted = true }
-  if (!aborted || (await signature(schemas[2], "NewsletterNotifications", "idx_notifications_type_created_id")).length !== 0) throw new Error("incompatible second expected name did not abort before the first index DDL")
+  if (!aborted || aggregateSignatureExists(await signature(schemas[2], "NewsletterNotifications", "idx_notifications_type_created_id"))) throw new Error("incompatible second expected name did not abort before the first index DDL")
   console.log("analytics migration cases: clean=pass legacy=pass incompatible-global-abort=pass")
 } finally {
   for (const schema of schemas) await connection.query(`DROP DATABASE IF EXISTS ${quote(schema)}`)
