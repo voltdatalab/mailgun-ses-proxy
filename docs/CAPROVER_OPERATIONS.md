@@ -46,6 +46,23 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 - `MAX_CONCURRENT`
 - `SHUTDOWN_GRACE_MS`
 
+### Workers SQS: batching e concorrência
+
+O worker de envio de newsletter permanece deliberadamente serializado: recebe e
+processa **uma** mensagem por vez (`batchSize=1`, `maxConcurrency=1`), pois uma
+mensagem representa uma campanha inteira. Os consumidores de eventos
+`newsletter-events` e `system-events` usam por padrão lotes de até **10** e
+processam até **10** handlers simultaneamente. O limite é o máximo aceito pelo
+SQS para `ReceiveMessage` e `DeleteMessageBatch`; os ACKs são enviados em lotes
+de no máximo 10 e somente para handlers que concluíram com sucesso. Esta
+concorrência de eventos não reutiliza `MAX_CONCURRENT`, que é um ajuste distinto
+do envio de destinatários.
+
+Uma resposta de long polling vazia continua saudável e não cria polling ocupado.
+Para um lote não vazio, o heartbeat só é renovado depois de ao menos um ACK de
+batch confirmado; falhas de handler ou de ACK ficam retryable conforme a política
+de visibility timeout/redrive/DLQ da fila.
+
 ### Persistência opcional de conteúdo formatado de newsletters
 
 - `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` (opcional): valores `1`, `true`, `yes` ou `on`, sem distinção entre maiúsculas e minúsculas, ativam a persistência; `false`, vazio ou qualquer outro valor a desativam (padrão: `false`).

@@ -1,35 +1,21 @@
 import {
-    DeleteMessageCommand,
-    Message,
-    MessageSystemAttributeName,
-    QueueAttributeName,
-    ReceiveMessageCommand
+    DeleteMessageBatchCommand,
+    type Message,
+    type MessageSystemAttributeName,
+    type QueueAttributeName,
+    ReceiveMessageCommand,
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
 import { heartbeat, markWorkerDead, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
-
-
-// Exponential back-off bounds for transient poll errors (ms).
 const POLL_BACKOFF_MIN_MS = 1_000
 const POLL_BACKOFF_MAX_MS = 30_000
-
-// If the loop hits this many consecutive unexpected errors, the worker exits
-// to avoid spinning indefinitely. The restart wrapper in server.ts will
-// bring it back with backoff.
 const MAX_CONSECUTIVE_ERRORS = 50
-
-// Graceful-shutdown flag. When set, all workers finish their current iteration
-// and then exit the poll loop so in-flight work can complete before the
-// process terminates.
+const SQS_BATCH_LIMIT = 10
 let _shutdownRequested = false
 
-/**
- * Signal all workers to stop polling after the current iteration.
- * In-flight handler calls are allowed to complete.
- */
 export function requestShutdown(): void {
     _shutdownRequested = true
     log.info("Shutdown requested — workers will drain after current iteration")
@@ -40,21 +26,41 @@ export function _isShutdownRequested(): boolean {
     return _shutdownRequested
 }
 
-interface WorkerConfig {
+export interface WorkerConfig {
     name: string
     queueUrl: string
     visibilityTimeout?: number
     waitTimeSeconds?: number
+    /** SQS receive batch size, clamped to the service limit of 1..10. */
+    batchSize?: number
+    /** Maximum simultaneous handler calls, bounded to the received batch. */
+    maxConcurrency?: number
     handler: (message: Message) => Promise<void>
 }
 
+function boundedSqsBatchSize(value: number | undefined): number {
+    const numeric = Number.isFinite(value) ? Math.floor(value!) : 1
+    return Math.min(SQS_BATCH_LIMIT, Math.max(1, numeric))
+}
+
+/** Exported test seam for the exact ReceiveMessageCommand input. */
+export function buildReceiveInput(queueUrl: string, visibilityTimeout: number, waitTimeSeconds: number, batchSize?: number) {
+    return {
+        QueueUrl: queueUrl,
+        AttributeNames: ["All"] as QueueAttributeName[],
+        MessageAttributeNames: ["All"],
+        MessageSystemAttributeNames: ["SentTimestamp", "ApproximateReceiveCount"] as MessageSystemAttributeName[],
+        VisibilityTimeout: visibilityTimeout,
+        // SQS permits at most ten messages in a receive request.
+        MaxNumberOfMessages: boundedSqsBatchSize(batchSize),
+        // Preserve long polling; empty responses do not spin the loop.
+        WaitTimeSeconds: waitTimeSeconds,
+    }
+}
+
 /**
- * Long-polling SQS worker.
- *  - handler resolves and acknowledgement succeeds → message deleted
- *  - handler throws   → message left in SQS for retry
- *  - poll error       → exponential back-off, loop continues
- *  - failed messages are left for the queue's redrive/DLQ policy
- *  - unexpected loop error → logged, backoff, loop continues (circuit-breaker exits after MAX_CONSECUTIVE_ERRORS)
+ * Long-polling SQS worker. Messages are handled by a bounded pool and only
+ * successful handlers with receipt handles are acknowledged as a batch.
  */
 export async function startWorker(config: WorkerConfig) {
     const {
@@ -62,45 +68,31 @@ export async function startWorker(config: WorkerConfig) {
         queueUrl,
         visibilityTimeout = 30,
         waitTimeSeconds = 20,
+        batchSize = 1,
+        maxConcurrency = 1,
         handler,
     } = config
-
     const client = bootstrapWorker(name, queueUrl)
     if (!client) return
 
     log.info({ name }, `Starting SQS worker: ${name}`)
     registerWorker(name)
-
-    const receiveInput = {
-        QueueUrl: queueUrl,
-        AttributeNames: ["All"] as QueueAttributeName[],
-        MessageAttributeNames: ["All"],
-        MessageSystemAttributeNames: [
-            MessageSystemAttributeName.SentTimestamp,
-            MessageSystemAttributeName.ApproximateReceiveCount,
-        ],
-        VisibilityTimeout: visibilityTimeout,
-        WaitTimeSeconds: waitTimeSeconds,
-    }
-
+    const receiveInput = buildReceiveInput(queueUrl, visibilityTimeout, waitTimeSeconds, batchSize)
+    const concurrency = boundedSqsBatchSize(maxConcurrency)
     let pollBackoffMs = POLL_BACKOFF_MIN_MS
     let consecutiveErrors = 0
 
     try {
         while (!_shutdownRequested) {
-            // Yield to the event loop between iterations so that DNS refresh,
-            // DB connection keepalives, GC, and timer callbacks can execute.
-            // Without this, sync I/O (logging) starves the loop after ~20K iterations.
             await new Promise(resolve => setImmediate(resolve))
-
             try {
                 let messages: Message[] | undefined
                 try {
-                    const { Messages } = await client.send(new ReceiveMessageCommand(receiveInput))
-                    messages = Messages
+                    const response = await client.send(new ReceiveMessageCommand(receiveInput))
+                    messages = response.Messages
                     pollBackoffMs = POLL_BACKOFF_MIN_MS
                 } catch (pollError) {
-                    log.error({ name, err: pollError }, `Poll error — retrying in ${pollBackoffMs}ms`)
+                    log.error({ name, errorClass: errorClass(pollError) }, `Poll error — retrying in ${pollBackoffMs}ms`)
                     await sleep(pollBackoffMs)
                     pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
                     consecutiveErrors++
@@ -108,128 +100,134 @@ export async function startWorker(config: WorkerConfig) {
                 }
 
                 if (!messages || messages.length === 0) {
+                    // ReceiveMessage remains a long-poll request, so this does not busy-loop.
                     heartbeat(name)
                     consecutiveErrors = 0
                     continue
                 }
 
-                let anyMessageAcknowledged = false
-
-                for (const message of messages) {
-                    if (await processSqsMessage(client, queueUrl, message, handler, name)) {
-                        anyMessageAcknowledged = true
-                    }
-                }
-
-                // Only consider the poll healthy if at least one handler
-                // succeeded and its acknowledgement succeeded. If every
-                // message failed (e.g. DB down or SQS delete failure), the
-                // worker should not mask the failure behind a heartbeat.
-                if (anyMessageAcknowledged) {
+                const acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
+                // A non-empty poll is healthy only after a confirmed batch-delete entry.
+                if (acknowledged > 0) {
                     heartbeat(name)
                     consecutiveErrors = 0
                 } else {
                     consecutiveErrors++
-                    log.warn(
-                        { name, consecutiveErrors },
-                        "All messages in batch failed — incrementing error counter"
-                    )
+                    log.warn({ name, consecutiveErrors }, "No messages in batch acknowledged — incrementing error counter")
                 }
             } catch (loopError) {
                 consecutiveErrors++
-                log.error(
-                    { name, err: loopError, consecutiveErrors },
-                    `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`
-                )
-
+                log.error({ name, errorClass: errorClass(loopError), consecutiveErrors }, `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`)
                 if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                    const msg = `Worker ${name} hit ${MAX_CONSECUTIVE_ERRORS} consecutive errors — exiting loop`
-                    log.error({ name }, msg)
-                    markWorkerDead(name, msg)
+                    const reason = `Worker ${name} hit ${MAX_CONSECUTIVE_ERRORS} consecutive errors — exiting loop`
+                    log.error({ name }, reason)
+                    markWorkerDead(name, reason)
                     return
                 }
-
                 await sleep(pollBackoffMs)
                 pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
             }
         }
-
-        // Clean exit — shutdown was requested
         log.info({ name }, `Worker ${name} stopped (shutdown requested)`)
         markWorkerDead(name, "graceful shutdown")
     } catch (fatalError) {
-        // Belt-and-suspenders: if something escapes all inner catches, log and exit.
-        log.error({ name, err: fatalError }, "Fatal error escaped worker loop")
+        log.error({ name, errorClass: errorClass(fatalError) }, "Fatal error escaped worker loop")
         markWorkerDead(name, fatalError)
         throw fatalError
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 /**
- * Processes one received message. A failed handler is deliberately not
- * acknowledged: SQS visibility/redrive policy controls subsequent retries and
- * DLQ delivery.
+ * Processes messages with a bounded pool, then deletes only successful work in
+ * SQS-sized batches. It returns confirmed acknowledgements, not delete attempts.
  */
+export async function processSqsMessages(
+    client: ReturnType<typeof sqsClient>,
+    queueUrl: string,
+    messages: Message[],
+    handler: (message: Message) => Promise<void>,
+    maxConcurrency = 1,
+    name = "worker",
+): Promise<number> {
+    const successful = await processWithConcurrency(messages, handler, maxConcurrency, name)
+    const ackable = successful.filter(message => Boolean(message.ReceiptHandle))
+    let acknowledged = 0
+    for (let offset = 0; offset < ackable.length; offset += SQS_BATCH_LIMIT) {
+        acknowledged += await deleteMessageBatch(client, queueUrl, ackable.slice(offset, offset + SQS_BATCH_LIMIT))
+    }
+    return acknowledged
+}
+
+/** Compatibility seam for callers/tests which process a single message. */
 export async function processSqsMessage(
     client: ReturnType<typeof sqsClient>,
     queueUrl: string,
     message: Message,
     handler: (message: Message) => Promise<void>,
-    name = "worker"
+    name = "worker",
 ): Promise<boolean> {
+    return (await processSqsMessages(client, queueUrl, [message], handler, 1, name)) === 1
+}
+
+async function processWithConcurrency(
+    messages: Message[],
+    handler: (message: Message) => Promise<void>,
+    maxConcurrency: number,
+    name: string,
+): Promise<Message[]> {
+    const successful: Message[] = []
+    let next = 0
+    const workerCount = Math.min(messages.length, boundedSqsBatchSize(maxConcurrency))
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (next < messages.length) {
+            const message = messages[next++]
+            try {
+                await handler(message)
+                successful.push(message)
+            } catch (handlerError) {
+                log.error({ name, messageId: message.MessageId, receiveCount: message.Attributes?.ApproximateReceiveCount, errorClass: errorClass(handlerError) }, "Handler error — message left in SQS for retry/redrive")
+            }
+        }
+    }))
+    return successful
+}
+
+async function deleteMessageBatch(
+    client: ReturnType<typeof sqsClient>,
+    queueUrl: string,
+    messages: Message[],
+): Promise<number> {
+    if (messages.length === 0) return 0
+    const entries = messages.map((message, index) => ({ Id: `entry-${index}`, ReceiptHandle: message.ReceiptHandle! }))
     try {
-        await handler(message)
-        return await deleteMessage(client, queueUrl, message)
-    } catch (handlerError) {
-        log.error(
-            {
-                name,
-                messageId: message.MessageId,
-                receiveCount: message.Attributes?.ApproximateReceiveCount,
-                err: handlerError,
-            },
-            "Handler error — message left in SQS for retry/redrive"
-        )
-        return false
+        const response = await client.send(new DeleteMessageBatchCommand({ QueueUrl: queueUrl, Entries: entries }))
+        const acknowledged = new Set(response.Successful?.map(entry => entry.Id).filter((id): id is string => Boolean(id)))
+        const failed = (response.Failed?.length ?? 0)
+        if (failed > 0) log.warn({ failed }, "Some SQS batch delete entries failed")
+        return entries.reduce((count, entry) => count + (acknowledged.has(entry.Id) ? 1 : 0), 0)
+    } catch (error) {
+        log.warn({ count: entries.length, errorClass: errorClass(error) }, "SQS batch delete request failed")
+        return 0
     }
 }
 
-/** Validates config and initialises the SQS client. Returns null if setup fails. */
 function bootstrapWorker(name: string, queueUrl: string): ReturnType<typeof sqsClient> | null {
     if (!queueUrl) {
         log.error({ name }, "[bootstrap] Queue URL missing — worker will not start")
         return null
     }
-
     try {
         return sqsClient()
-    } catch (err) {
-        log.error({ name, err }, "[bootstrap] SQS client init failed (check SQS_REGION) — worker will not start")
+    } catch (error) {
+        log.error({ name, errorClass: errorClass(error) }, "[bootstrap] SQS client init failed — worker will not start")
         return null
     }
 }
 
-async function deleteMessage(
-    client: ReturnType<typeof sqsClient>,
-    queueUrl: string,
-    message: Message
-): Promise<boolean> {
-    if (!message.ReceiptHandle) return false
-    try {
-        await client.send(new DeleteMessageCommand({
-            QueueUrl: queueUrl,
-            ReceiptHandle: message.ReceiptHandle,
-        }))
-        return true
-    } catch (err) {
-        // Non-fatal — message becomes visible again after the visibility timeout.
-        log.warn({ messageId: message.MessageId, err }, "Failed to delete message from SQS")
-        return false
-    }
+function errorClass(error: unknown): string {
+    return error instanceof Error ? error.name : typeof error
 }
 
 function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms))
+    return new Promise(resolve => setTimeout(resolve, ms))
 }
