@@ -59,9 +59,21 @@ concorrência de eventos não reutiliza `MAX_CONCURRENT`, que é um ajuste disti
 do envio de destinatários.
 
 Uma resposta de long polling vazia continua saudável e não cria polling ocupado.
-Para um lote não vazio, o heartbeat só é renovado depois de ao menos um ACK de
-batch confirmado; falhas de handler ou de ACK ficam retryable conforme a política
-de visibility timeout/redrive/DLQ da fila.
+A fila de newsletter usa visibility timeout de **900 segundos**, pois uma única
+mensagem pode representar uma campanha inteira. As filas `newsletter-events` e
+`system-events` usam visibility timeout explícito e conservador de **120
+segundos**: como o ACK do lote só ocorre após a conclusão dos handlers, o prazo
+precisa acomodar o handler mais lento do lote concorrente, além do envio do ACK,
+e não o padrão de 30 segundos do worker. Para um lote não vazio, o heartbeat só
+é renovado depois de ao menos um ACK de batch confirmado; falhas de handler ou de
+ACK ficam retryable conforme a política de visibility timeout/redrive/DLQ da
+fila.
+
+No `SIGTERM` ou `SIGINT`, o worker aborta imediatamente um long poll SQS ativo e
+não inicia handlers para mensagens recém-recebidas. Os handlers já em execução
+podem drenar dentro do período de graça de desligamento configurado pela
+plataforma (`SHUTDOWN_GRACE_MS`). Mensagens sem ACK permanecem não confirmadas e
+ficam disponíveis para retry e, quando aplicável, redrive pela política da fila.
 
 ### Persistência opcional de conteúdo formatado de newsletters
 

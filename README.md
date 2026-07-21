@@ -100,12 +100,6 @@ npm start
 ### 1. Proxy Setup (`.env`)
 Fill in your `AWS_ACCESS_KEY_ID`, `DATABASE_URL`, and queue URLs. (See `.env.dev` for full details).
 
-### SQS worker timing and shutdown
-
-The newsletter sender uses a **900-second** visibility timeout because one SQS item can represent an entire campaign. Event queues process up to ten messages concurrently and acknowledge the batch only after its handlers complete, so `newsletter-events` and `system-events` use an explicit conservative **120-second** visibility timeout (rather than the 30-second worker default).
-
-On `SIGTERM`/`SIGINT`, workers abort an active SQS long-poll immediately and do not begin handlers for newly received messages. Handlers already running are allowed to drain within the platform's configured shutdown grace period; unacknowledged messages remain available for SQS retry/redrive.
-
 ### 2. Ghost CMS Integration
 Update your Ghost `config.production.json` or Environment Variables:
 
