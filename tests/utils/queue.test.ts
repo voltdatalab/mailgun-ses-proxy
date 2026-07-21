@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const log = vi.hoisted(() => ({ warn: vi.fn() }));
+
+vi.mock("@/lib/core/logger", () => ({
+  default: { child: vi.fn(() => log) },
+}));
+
 import { TaskQueue } from "../../lib/task-queue"; // Updated import
 
 describe("TaskQueue Class", () => {
@@ -78,6 +85,29 @@ describe("TaskQueue Class", () => {
     expect(stats.settledCount).toBe(2);
     expect(stats.failedCount).toBe(1);
     expect(stats.failedItems).toContain("f1");
+  });
+
+  it("logs only a safe error class and item ID when an item fails", async () => {
+    log.warn.mockClear();
+    const queue = new TaskQueue({ rateLimit: 1000, maxConcurrent: 10 });
+    const privateMessage = "private failure message";
+    const privatePayload = { recipient: "recipient.private@example.test", body: "private newsletter body" };
+    const error = Object.assign(new Error(privateMessage), { payload: privatePayload });
+    error.stack = "private stack trace";
+
+    await expect(queue.enqueue(async () => { throw error; }, "safe-item-id"))
+      .rejects.toBe(error);
+    await queue.waitUntilFinished();
+
+    expect(log.warn).toHaveBeenCalledWith(
+      { errorClass: "Error", itemId: "safe-item-id" },
+      "Queue item failed",
+    );
+
+    const loggedOutput = JSON.stringify(log.warn.mock.calls);
+    for (const privateValue of [privateMessage, error.stack, JSON.stringify(privatePayload)]) {
+      expect(loggedOutput).not.toContain(privateValue);
+    }
   });
 
   it("clear() removes queued items and stops processing", async () => {
