@@ -11,6 +11,16 @@ function trackedDeliveryEvent() {
     })
 }
 
+function untrackedDeliveryEvent() {
+    return JSON.stringify({
+        eventType: 'Delivery',
+        mail: {
+            messageId: 'ses-message-untracked',
+            tags: {},
+        },
+    })
+}
+
 function processor(overrides: Partial<Parameters<typeof createEventProcessor>[0]> = {}) {
     return createEventProcessor({
         name: 'events',
@@ -31,6 +41,19 @@ describe('createEventProcessor', () => {
 
     it('rejects malformed event data so it is not acknowledged', async () => {
         await expect(processor()({ MessageId: 'sqs-1', Body: '{not-json' })).rejects.toThrow()
+    })
+
+    it('acknowledges a valid untracked event without looking up or persisting it', async () => {
+        const lookupMessage = vi.fn()
+        const saveNotification = vi.fn()
+
+        await expect(processor({ lookupMessage, saveNotification })({
+            MessageId: 'sqs-1',
+            Body: untrackedDeliveryEvent(),
+        })).resolves.toBeUndefined()
+
+        expect(lookupMessage).not.toHaveBeenCalled()
+        expect(saveNotification).not.toHaveBeenCalled()
     })
 
     it('rejects when the corresponding DB message is missing', async () => {
