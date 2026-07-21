@@ -73,7 +73,27 @@ No `SIGTERM` ou `SIGINT`, o worker aborta imediatamente um long poll SQS ativo e
 não inicia handlers para mensagens recém-recebidas. Os handlers já em execução
 podem drenar dentro do período de graça de desligamento configurado pela
 plataforma (`SHUTDOWN_GRACE_MS`). Mensagens sem ACK permanecem não confirmadas e
-ficam disponíveis para retry e, quando aplicável, redrive pela política da fila.
+ficam disponíveis para retry e, quando aplicável, redrive pela política da
+fila.
+
+### Supervisão e restart dos workers
+
+Os três loops SQS são supervisionados conjuntamente pelo processo HTTP. Se um
+worker resolver ou rejeitar **antes** de um desligamento solicitado, inclusive
+quando o circuit breaker encerra o loop após erros consecutivos, o processo
+inicia um desligamento fatal coordenado: para de aceitar novas conexões HTTP,
+solicita que todos os workers abortem long polls e permite que handlers em voo
+drenem por `SHUTDOWN_GRACE_MS`. Depois que os workers restantes se assentam, o
+processo sai com código **1**, para que o CapRover reinicie o contêiner. Assim,
+um worker marcado como morto não pode deixar o HTTP e os demais workers mantendo
+um contêiner degradado vivo.
+
+Em `SIGTERM`/`SIGINT`, a parada dos workers é esperada e o mesmo dreno coordenado
+termina com código **0** depois que todos se assentarem. Se o período de graça
+expirar, o processo força a saída com código **1**; isso evita que um handler
+travado impeça a plataforma de substituir o contêiner. Os logs de supervisão
+registram apenas o nome do worker, o resultado e `errorClass`, sem a razão ou
+stack brutas.
 
 ### Persistência opcional de conteúdo formatado de newsletters
 

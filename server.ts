@@ -1,57 +1,83 @@
 import dotenv from 'dotenv'
 dotenv.config()
 
-import { createServer, IncomingMessage, ServerResponse } from "http"
+import { createServer, IncomingMessage, Server, ServerResponse } from "http"
 import next from "next"
-import logger from "./lib/core/logger"
-
-import { processNewsletterEventsQueue, processNewsletterQueue, processSystemEventsQueue } from "./service/background-process"
+import logger, { flushLogger } from "./lib/core/logger"
 import { requestShutdown } from "./lib/core/sqs-worker"
-import { flushLogger } from "./lib/core/logger"
-
-// ── Process-level error handlers ─────────────────────────────────────────────
-// Prevent silent crashes from stray promise rejections or uncaught exceptions.
-
-process.on('unhandledRejection', (reason) => {
-    logger.error({ err: reason }, 'Unhandled promise rejection')
-})
-
-process.on('uncaughtException', (err) => {
-    logger.fatal({ err }, 'Uncaught exception — shutting down')
-    process.exit(1)
-})
-
-// ── Graceful shutdown ────────────────────────────────────────────────────────
-// On SIGTERM/SIGINT (e.g. Kubernetes pod termination), signal workers to stop
-// polling. In-flight handler calls are allowed to finish. After a grace period
-// the process exits regardless, so we don't block pod shutdown forever.
+import { createWorkerSupervisor, errorClass } from "./lib/core/worker-supervisor"
+import { processNewsletterEventsQueue, processNewsletterQueue, processSystemEventsQueue } from "./service/background-process"
 
 const SHUTDOWN_GRACE_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "10000")
+let httpServer: Server | undefined
 let shutdownInProgress = false
+let intendedExitCode: 0 | 1 = 0
+let shutdownTimer: NodeJS.Timeout | undefined
 
-function initiateShutdown(signal: string) {
+const workerSupervisor = createWorkerSupervisor(
+    ['newsletter-sender', 'newsletter-events', 'system-events'],
+    {
+        onUnexpectedStop: (stop) => {
+            initiateShutdown('worker stopped unexpectedly', 1, stop)
+        },
+        onAllWorkersSettled: (exitCode) => {
+            finishShutdown(exitCode)
+        },
+    },
+)
+
+// ── Coordinated shutdown ─────────────────────────────────────────────────────
+// Stop accepting HTTP traffic, abort worker polls, and let active handlers drain.
+// A worker that exits before shutdown is requested is fatal: it has already been
+// marked unhealthy by the worker loop and this process must exit for CapRover to
+// replace the container.
+function initiateShutdown(
+    reason: string,
+    exitCode: 0 | 1,
+    details: Record<string, unknown> = {},
+): void {
     if (shutdownInProgress) return
     shutdownInProgress = true
-    logger.info({ signal }, `${signal} received — draining workers (grace ${SHUTDOWN_GRACE_MS}ms)`)
-    flushLogger()
+    intendedExitCode = exitCode
+    workerSupervisor.requestGracefulShutdown()
+
+    logger.info({ reason, exitCode, graceMs: SHUTDOWN_GRACE_MS, ...details }, "Coordinated shutdown started — draining workers")
+    httpServer?.close(() => logger.info("HTTP server stopped accepting connections"))
     requestShutdown()
 
-    // Hard-stop fallback: if workers don't finish within the grace period,
-    // exit anyway so the container runtime is not forced to SIGKILL us.
-    setTimeout(() => {
-        logger.warn("Shutdown grace period expired — forcing exit")
+    // The normal path exits in finishShutdown after every worker settles. This
+    // protects the platform from a handler that cannot drain in the grace time.
+    shutdownTimer = setTimeout(() => {
+        logger.warn({ reason, intendedExitCode }, "Shutdown grace period expired — forcing exit")
         process.exit(1)
-    }, SHUTDOWN_GRACE_MS).unref()
+    }, SHUTDOWN_GRACE_MS)
+    shutdownTimer.unref()
 }
 
-process.on('SIGTERM', () => initiateShutdown('SIGTERM'))
-process.on('SIGINT', () => initiateShutdown('SIGINT'))
+function finishShutdown(workerExitCode: 0 | 1): void {
+    const exitCode: 0 | 1 = intendedExitCode === 1 || workerExitCode === 1 ? 1 : 0
+    if (shutdownTimer) clearTimeout(shutdownTimer)
+    logger.info({ exitCode }, "All workers settled — exiting process")
+    flushLogger()
+    process.exit(exitCode)
+}
+
+// ── Process-level error handlers ─────────────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
+    logger.error({ errorClass: errorClass(reason) }, 'Unhandled promise rejection')
+})
+
+process.on('uncaughtException', (error) => {
+    logger.fatal({ errorClass: errorClass(error) }, 'Uncaught exception — shutting down')
+    initiateShutdown('uncaught exception', 1, { errorClass: errorClass(error) })
+})
+
+process.on('SIGTERM', () => initiateShutdown('SIGTERM', 0))
+process.on('SIGINT', () => initiateShutdown('SIGINT', 0))
 
 // ── Server startup ───────────────────────────────────────────────────────────
-
 const port = parseInt(process.env.PORT || "3000")
 const dev = process.env.NODE_ENV !== "production"
-
 const app = next({ dev })
 const handle = app.getRequestHandler()
 
@@ -60,39 +86,20 @@ const handler = (req: IncomingMessage, res: ServerResponse) => {
     const parsedUrl = new URL(req.url!, baseURL)
     handle(req, res, {
         pathname: parsedUrl.pathname,
-        query: Object.fromEntries(parsedUrl.searchParams)
+        query: Object.fromEntries(parsedUrl.searchParams),
     } as any)
 }
 
 app.prepare().then(() => {
-    createServer(handler).listen(port)
+    httpServer = createServer(handler)
+    httpServer.listen(port)
     const type = dev ? "development" : process.env.NODE_ENV
     logger.info(`> Server listening at http://localhost:${port} as ${type}`)
 
-    // Workers run as background loops. We wait for ALL of them to settle
-    // before exiting, so one crashing worker doesn't kill the others mid-flight.
-    const workerPromises = [
-        processNewsletterQueue()
-            .then(() => logger.error("newsletter-sender stopped unexpectedly"))
-            .catch((e) => { logger.error(e, "newsletter-sender crashed") }),
-
-        processNewsletterEventsQueue()
-            .then(() => logger.error("newsletter-events stopped unexpectedly"))
-            .catch((e) => { logger.error(e, "newsletter-events crashed") }),
-
-        processSystemEventsQueue()
-            .then(() => logger.error("system-events stopped unexpectedly"))
-            .catch((e) => { logger.error(e, "system-events crashed") }),
-    ]
-
-    Promise.allSettled(workerPromises).then((results) => {
-        for (const r of results) {
-            if (r.status === "rejected") {
-                logger.error({ err: r.reason }, "Worker settled with rejection")
-            }
-        }
-        logger.error("All workers have stopped — exiting process")
-        process.exit(1)
-    })
-
-}).catch((e) => { logger.error(e, "stopping the server."); process.exit(1) })
+    workerSupervisor.watch('newsletter-sender', processNewsletterQueue())
+    workerSupervisor.watch('newsletter-events', processNewsletterEventsQueue())
+    workerSupervisor.watch('system-events', processSystemEventsQueue())
+}).catch((error) => {
+    logger.error({ errorClass: errorClass(error) }, "Server preparation failed — shutting down")
+    initiateShutdown('server preparation failed', 1, { errorClass: errorClass(error) })
+})
