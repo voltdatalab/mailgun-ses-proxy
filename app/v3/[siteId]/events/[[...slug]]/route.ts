@@ -1,5 +1,5 @@
 import logger from "@/lib/core/logger"
-import { fetchAnalyticsEvents, validateQueryParams } from "@/service/events-service/events-utils"
+import { fetchAnalyticsEvents, QueryValidationError, validateQueryParams } from "@/service/events-service/events-utils"
 import { NextRequest } from "next/server"
 
 const log = logger.child({ module: "app/v3/events" })
@@ -27,9 +27,12 @@ async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
         log.debug({ count: events.items.length, siteId, slug }, "analytics events count")
         return Response.json(events, { status: 200 })
     } catch (e) {
-        log.error(e, 'error when fetching analytics events')
-        const errorMessage = e instanceof Error ? e.message : "An error occurred"
-        return Response.json({ message: errorMessage }, { status: 400 })
+        const errorClass = e instanceof Error ? e.constructor.name : "UnknownError"
+        log.error({ errorClass, siteId }, "error when fetching analytics events")
+        if (e instanceof QueryValidationError) {
+            return Response.json({ message: e.message }, { status: 400 })
+        }
+        return Response.json({ message: "Unable to fetch analytics events" }, { status: 500 })
     }
 }
 

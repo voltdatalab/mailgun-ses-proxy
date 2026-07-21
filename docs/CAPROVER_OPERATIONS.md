@@ -119,6 +119,14 @@ Se qualquer nome esperado já existir com definição incompatível, o preflight
 
 A conclusão local/estática desta mudança não substitui validação contra banco real: Task 12 e a validation app da Task 14 devem executar a migração em MySQL e MariaDB nas versões e engines representativas. Devem testar compatibilidade do statement preparado e do mecanismo de bloqueio por precondição, comportamento de metadata locks, timeout/monitoramento e janela de DDL, e `EXPLAIN` das consultas de analytics. Antes de produção, confirme que a migração foi registrada, que os índices ou seus equivalentes legados válidos existem, e que a aplicação/Ghost continuam funcionais antes da promoção.
 
+## Paginação de analytics Ghost/Mailgun
+
+`GET /v3/{siteId}/events` mantém o formato Mailgun `{items, paging: {next}}`. A primeira chamada aceita o `start` numérico legado (inteiro maior ou igual a zero), mas o link `paging.next` remove esse offset e inclui um cursor opaco URL-safe. Ghost deve seguir esse link sem reconstruí-lo: ele preserva `event`, `begin`, `end`, `limit`, `ascending` e filtros compatíveis adicionais. O cursor usa a ordem estável `(created, id)` e impede lacunas ou duplicações quando vários eventos possuem o mesmo `created`.
+
+Os parâmetros são validados estritamente: `limit` é inteiro entre 1 e 300 (padrão 300), `begin` e `end` são inteiros finitos com `begin < end`, e `ascending` aceita apenas `yes`, `true` ou `1` para ordem ascendente; ausente, `no`, `false` ou `0` usam ordem descendente. Um cursor inválido ou incompatível com a ordem retorna `400` sem expor detalhes internos. Uma página vazia mantém um `paging.next` determinístico, sem avançar cursor; Ghost pode encerrar a leitura ao receber `items` vazio.
+
+A janela temporal continua filtrando **`created` (tempo de ingestão)**, e não o timestamp do evento SES. Esta alteração de paginação não muda a semântica temporal nem os filtros de site/tipo.
+
 ## Rede e Ghost
 
 Configure o Ghost para chamar a URL **interna** do serviço CapRover. O proxy não deve receber exposição pública direta; qualquer acesso externo deve permanecer atrás da política de rede/proxy controlada da plataforma. Não publicar a porta de contêiner nem configurar acesso público apenas para integração com Ghost.
