@@ -109,6 +109,14 @@ O comando de inicialização definido no projeto executa `prisma migrate deploy`
 
 Antes de qualquer deploy que possa aplicar migrações, faça um backup privado do banco, protegido e recuperável, e valide previamente o procedimento de restauração no ambiente apropriado. Planeje migrações como alterações aditivas e retrocompatíveis durante a janela em que versões antiga e nova possam coexistir; mudanças destrutivas devem ser postergadas para uma etapa posterior controlada.
 
+### Preflight da migração de índices de analytics Ghost
+
+Antes da promoção para produção, faça um backup privado e recuperável do banco e confirme a janela de DDL: inspecione sessões/locks em andamento e o impacto esperado do `CREATE INDEX` no tamanho e carga das tabelas. Não execute essa inspeção ou a migração a partir de contêineres ad hoc; o deploy controlado executa `prisma migrate deploy`.
+
+A migração `20260721120000_add_ghost_analytics_indexes` consulta `information_schema.STATISTICS` no schema atual antes de cada DDL e usa statements preparados para criar somente índices ausentes pelos nomes exatos. Ela adiciona, quando faltarem, `NewsletterNotifications(type, created, id)` (`idx_notifications_type_created_id`) e `NewsletterBatch(siteId)` (`NewsletterBatch_siteId_idx`). Ela não remove nem tenta consolidar índices redundantes já existentes em produção; qualquer limpeza exige uma mudança separada, avaliada para risco online e rollback.
+
+A conclusão local/estática desta mudança não substitui validação contra banco real: exija app/CI da Task 12 e a validation app da Task 14 antes de produção. Confirme no ambiente de validação que a migração foi registrada, que os índices esperados existem e que a aplicação/Ghost continuam funcionais antes da promoção.
+
 ## Rede e Ghost
 
 Configure o Ghost para chamar a URL **interna** do serviço CapRover. O proxy não deve receber exposição pública direta; qualquer acesso externo deve permanecer atrás da política de rede/proxy controlada da plataforma. Não publicar a porta de contêiner nem configurar acesso público apenas para integração com Ghost.
