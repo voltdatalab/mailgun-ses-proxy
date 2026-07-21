@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { Mail, Lock, Loader2, AlertCircle, ShieldCheck } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { cn } from "@/lib/utils"
+
 
 export default function LoginPage() {
     const router = useRouter()

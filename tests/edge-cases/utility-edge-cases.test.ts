@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { ApiResponse } from '@/lib/api-response'
 import { formDataToObject } from '@/lib/core/common'
 import { ValidationService } from '@/service/validation-service/validation'
@@ -506,8 +506,7 @@ describe('Utility Edge Cases', () => {
       for (let i = 0; i < 1000; i++) {
         const formData = new FormData()
         formData.append('test', 'x'.repeat(10000))
-        const result = formDataToObject(formData)
-        // Let result go out of scope
+        formDataToObject(formData)
       }
       
       // Final test should still work

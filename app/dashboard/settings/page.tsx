@@ -4,13 +4,6 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Database, Globe, Info, Save, Settings } from "lucide-react"
 
-interface Setting {
-    key: string
-    label: string
-    type: string
-    value: string
-    source: "database" | "environment"
-}
 
 export default function SettingsPage() {
     return (

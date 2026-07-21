@@ -53,11 +53,6 @@ interface Pagination {
     totalPages: number
 }
 
-const statusStyles: Record<string, string> = {
-    sent: "bg-emerald-500/10 text-emerald-500",
-    pending: "bg-amber-500/10 text-amber-500",
-    error: "bg-destructive/10 text-destructive",
-}
 
 const eventBadgeStyles: Record<string, string> = {
     Delivery: "bg-emerald-500/10 text-emerald-500",

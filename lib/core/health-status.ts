@@ -58,6 +58,12 @@ export function publicHealthProjection(snapshot = buildHealthSnapshot()) {
 }
 
 export function detailedHealthProjection(snapshot = buildHealthSnapshot()) {
-    const { httpStatus: _httpStatus, ...body } = snapshot
-    return body
+    return {
+        status: snapshot.status,
+        ready: snapshot.ready,
+        degraded: snapshot.degraded,
+        timestamp: snapshot.timestamp,
+        workers: snapshot.workers,
+        backlog: snapshot.backlog,
+    }
 }

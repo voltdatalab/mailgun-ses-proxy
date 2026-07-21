@@ -10,7 +10,7 @@
 
 Esta integração usa o Método 3: o CapRover lê o `captain-definition` na raiz e constrói a aplicação a partir do Dockerfile indicado por `dockerfilePath`. O manifesto mínimo aponta para `dockerfile`; não introduz override de imagem, compose, nem configuração adicional de porta.
 
-O processo HTTP em runtime escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`). Configure a porta HTTP interna da app como `3000` no CapRover. Embora o Dockerfile upstream declare atualmente `EXPOSE 8080`, `EXPOSE` é apenas metadado de imagem e **não** deve orientar essa configuração do CapRover. O alinhamento entre esse metadado e a porta de runtime deve ser tratado como tarefa separada no upstream/fork; não alterar o Dockerfile nesta tarefa. A verificação de saúde é `GET /healthcheck`; o endpoint responde `200` enquanto os workers registrados estiverem saudáveis e `503` caso algum worker registrado esteja inativo.
+O processo HTTP em runtime escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`), e o Dockerfile declara `EXPOSE 3000` para refletir esse runtime. Configure a porta HTTP interna da app como `3000` no CapRover. A verificação de saúde é `GET /healthcheck`; o endpoint responde `200` enquanto os workers registrados estiverem saudáveis e `503` caso algum worker registrado esteja inativo.
 
 ## Configuração de ambiente
 
@@ -128,7 +128,7 @@ A migração `20260721120000_add_ghost_analytics_indexes` lê `information_schem
 
 Se qualquer nome esperado já existir com definição incompatível, o preflight global dos dois índices bloqueia explicitamente antes de qualquer DDL da migração, em vez de mascarar o drift ou deixar aplicação parcial. O diagnóstico usa um sentinela fixo de `information_schema`, sem interpolar metadados observados. Não acrescentar `ALGORITHM` ou `LOCK` sem validação específica do motor/versão.
 
-A conclusão local/estática desta mudança não substitui validação contra banco real: Task 12/14 e a validation app da Task 14 devem executar a migração em MySQL e MariaDB nas versões e engines representativas. Devem testar compatibilidade do statement preparado e do mecanismo de bloqueio por precondição, comportamento de metadata locks, timeout/monitoramento e janela de DDL. Como o índice `(type, created, id)` pode exigir filesort/merge para múltiplos tipos, Task 12/14 deve executar `EXPLAIN` especificamente para `event=delivered OR opened` (além das consultas de tipo único) e registrar o plano antes de produção. Não há alteração de índice ou schema nesta tarefa. Antes de produção, confirme que a migração foi registrada, que os índices ou seus equivalentes legados válidos existem, e que a aplicação/Ghost continuam funcionais antes da promoção.
+A conclusão local/estática desta mudança não substitui validação contra banco real: a Task 12/14 exige que, antes da Task 14, o workflow GitHub Actions `ci` esteja verde nos jobs `mysql` (MySQL 8.0) e `mariadb` (MariaDB 11.4). Eles executam `prisma migrate deploy` em banco limpo, toda a suíte com `runPrismaTests=true` e relatório JSON que falha para testes pending/skipped ou failed. Os mesmos jobs executam os três cenários isolados da migração: criação limpa das assinaturas exatas, no-op para nomes legados equivalentes e abort global quando o segundo nome esperado é incompatível. A CI também executa `EXPLAIN` especificamente para `event=delivered OR opened` (além das consultas de tipo único), registra o plano antes de produção e aceita que o OR possa exigir filesort/merge apesar de usar o índice. Não há alteração de índice ou schema nesta tarefa. Antes de produção, confirme que a migração foi registrada, que os índices ou seus equivalentes legados válidos existem, e que a aplicação/Ghost continuam funcionais antes da promoção.
 
 ## Paginação de analytics Ghost/Mailgun
 
@@ -155,7 +155,7 @@ Antes de promover para produção a versão que não descarta manualmente mensag
 
 ## Reprodutibilidade do build
 
-O Dockerfile upstream executa `bun install` sem modo de lockfile congelado. Assim, o mesmo SHA de fonte pode resolver versões diferentes de dependências ainda permitidas e produzir imagens diferentes. Para cada build/deploy, registre o SHA exato de fonte construído e o identificador/digest da imagem resultante. A adoção de instalação congelada deve ser acompanhada como tarefa separada no upstream/fork; não modificar o Dockerfile nesta tarefa.
+O Dockerfile fixa Bun 1.3.6 e executa `bun install --frozen-lockfile` usando `bun.lock`, portanto o build não pode resolver versões novas silenciosamente. Para cada build/deploy, registre o SHA exato de fonte construído e o identificador/digest da imagem resultante.
 
 ## Política sem Docker bruto
 
