@@ -26,6 +26,11 @@ SET @analytics_notifications_expected_name_matches := (
             SELECT COUNT(*) = 3
                AND MIN(NON_UNIQUE) = 1
                AND MAX(NON_UNIQUE) = 1
+               AND MIN(SUB_PART IS NULL) = 1
+               AND MIN(COLLATION) = 'A'
+               AND MAX(COLLATION) = 'A'
+               AND MIN(INDEX_TYPE) = 'BTREE'
+               AND MAX(INDEX_TYPE) = 'BTREE'
                AND GROUP_CONCAT(
                     CONCAT(SEQ_IN_INDEX, ':', COLUMN_NAME)
                     ORDER BY SEQ_IN_INDEX SEPARATOR ','
@@ -50,6 +55,11 @@ SET @analytics_notifications_equivalent_definition_exists := EXISTS(
         HAVING COUNT(*) = 3
            AND MIN(NON_UNIQUE) = 1
            AND MAX(NON_UNIQUE) = 1
+           AND MIN(SUB_PART IS NULL) = 1
+           AND MIN(COLLATION) = 'A'
+           AND MAX(COLLATION) = 'A'
+           AND MIN(INDEX_TYPE) = 'BTREE'
+           AND MAX(INDEX_TYPE) = 'BTREE'
            AND GROUP_CONCAT(
                 CONCAT(SEQ_IN_INDEX, ':', COLUMN_NAME)
                 ORDER BY SEQ_IN_INDEX SEPARATOR ','
@@ -73,6 +83,11 @@ SET @analytics_batch_expected_name_matches := (
             SELECT COUNT(*) = 1
                AND MIN(NON_UNIQUE) = 1
                AND MAX(NON_UNIQUE) = 1
+               AND MIN(SUB_PART IS NULL) = 1
+               AND MIN(COLLATION) = 'A'
+               AND MAX(COLLATION) = 'A'
+               AND MIN(INDEX_TYPE) = 'BTREE'
+               AND MAX(INDEX_TYPE) = 'BTREE'
                AND GROUP_CONCAT(
                     CONCAT(SEQ_IN_INDEX, ':', COLUMN_NAME)
                     ORDER BY SEQ_IN_INDEX SEPARATOR ','
@@ -97,6 +112,11 @@ SET @analytics_batch_equivalent_definition_exists := EXISTS(
         HAVING COUNT(*) = 1
            AND MIN(NON_UNIQUE) = 1
            AND MAX(NON_UNIQUE) = 1
+           AND MIN(SUB_PART IS NULL) = 1
+           AND MIN(COLLATION) = 'A'
+           AND MAX(COLLATION) = 'A'
+           AND MIN(INDEX_TYPE) = 'BTREE'
+           AND MAX(INDEX_TYPE) = 'BTREE'
            AND GROUP_CONCAT(
                 CONCAT(SEQ_IN_INDEX, ':', COLUMN_NAME)
                 ORDER BY SEQ_IN_INDEX SEPARATOR ','

@@ -39,27 +39,56 @@ describe("Ghost analytics indexes", () => {
     expect(schema).not.toMatch(/@@index\(\[type, created\]/)
   })
 
-  it("preflights ordered columns and non-uniqueness for both indexes", () => {
+  it("preflights complete MySQL/MariaDB index signatures for both exact and legacy names", () => {
     expect(migration).toContain("information_schema.STATISTICS")
     expect(migration).toContain("TABLE_SCHEMA = DATABASE()")
     expect(migration).toContain("SEQ_IN_INDEX")
     expect(migration).toContain("COLUMN_NAME")
     expect(migration).toContain("NON_UNIQUE")
 
+    const completeSignaturePredicates = [
+      "MIN(NON_UNIQUE) = 1",
+      "MAX(NON_UNIQUE) = 1",
+      "MIN(SUB_PART IS NULL) = 1",
+      "MIN(COLLATION) = 'A'",
+      "MAX(COLLATION) = 'A'",
+      "MIN(INDEX_TYPE) = 'BTREE'",
+      "MAX(INDEX_TYPE) = 'BTREE'",
+    ]
+
     for (const index of indexes) {
       const { blockStart, block } = preflightBlock(index)
+      const equivalentMarker = `SET @analytics_${index.key}_equivalent_definition_exists`
+      const [exactNameCheck, equivalentNameCheck] = block.split(equivalentMarker)
 
       expect(blockStart).toBeGreaterThan(-1)
-      expect(block).toContain(`@analytics_${index.key}_expected_name_exists`)
-      expect(block).toContain(`@analytics_${index.key}_expected_name_matches`)
-      expect(block).toContain(`@analytics_${index.key}_equivalent_definition_exists`)
+      expect(exactNameCheck).toContain(`@analytics_${index.key}_expected_name_exists`)
+      expect(exactNameCheck).toContain(`@analytics_${index.key}_expected_name_matches`)
+      expect(equivalentNameCheck).toContain(`INDEX_NAME <> '${index.name}'`)
+
+      for (const predicate of completeSignaturePredicates) {
+        expect(exactNameCheck).toContain(predicate)
+        expect(equivalentNameCheck).toContain(predicate)
+      }
+
       expect(block).toContain(`INDEX_NAME = '${index.name}'`)
-      expect(block).toContain(`INDEX_NAME <> '${index.name}'`)
       expect(block).toContain(`COUNT(*) = ${index.columnCount}`)
-      expect(block).toContain("MIN(NON_UNIQUE) = 1")
-      expect(block).toContain("MAX(NON_UNIQUE) = 1")
       expect(block).toContain("ORDER BY SEQ_IN_INDEX")
       expect(block).toContain(`) = '${index.definition}'`)
+    }
+  })
+
+  it("does not describe prefix, direction, or type mismatches as equivalent", () => {
+    const mismatchPredicates = [/SUB_PART IS NULL/, /COLLATION\) = 'A'/, /INDEX_TYPE\) = 'BTREE'/]
+
+    for (const index of indexes) {
+      const { block } = preflightBlock(index)
+      const equivalentMarker = `SET @analytics_${index.key}_equivalent_definition_exists`
+      const [, equivalentNameCheck] = block.split(equivalentMarker)
+
+      for (const predicate of mismatchPredicates) {
+        expect(equivalentNameCheck).toMatch(predicate)
+      }
     }
   })
 
