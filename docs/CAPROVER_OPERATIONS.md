@@ -10,7 +10,7 @@
 
 Esta integração usa o Método 3: o CapRover lê o `captain-definition` na raiz e constrói a aplicação a partir do Dockerfile indicado por `dockerfilePath`. O manifesto mínimo aponta para `dockerfile`; não introduz override de imagem, compose, nem configuração adicional de porta.
 
-O processo HTTP escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`). Configure a porta HTTP interna da app como `3000` no CapRover. A verificação de saúde é `GET /healthcheck`; o endpoint responde `200` enquanto os workers registrados estiverem saudáveis e `503` caso algum worker registrado esteja inativo.
+O processo HTTP em runtime escuta a porta de contêiner **3000** (`PORT` tem esse padrão em `server.ts`). Configure a porta HTTP interna da app como `3000` no CapRover. Embora o Dockerfile upstream declare atualmente `EXPOSE 8080`, `EXPOSE` é apenas metadado de imagem e **não** deve orientar essa configuração do CapRover. O alinhamento entre esse metadado e a porta de runtime deve ser tratado como tarefa separada no upstream/fork; não alterar o Dockerfile nesta tarefa. A verificação de saúde é `GET /healthcheck`; o endpoint responde `200` enquanto os workers registrados estiverem saudáveis e `503` caso algum worker registrado esteja inativo.
 
 ## Configuração de ambiente
 
@@ -46,7 +46,15 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 - `MAX_CONCURRENT`
 - `SHUTDOWN_GRACE_MS`
 
+### Persistência opcional de conteúdo formatado de newsletters
+
+- `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` (opcional): aceita somente `true` ou `false`; o padrão é `false`.
+
+Quando definido como `true`, o serviço persiste conteúdos formatados completos de newsletters para auditoria. Isso pode ampliar a exposição de dados pessoais/conteúdo, o volume do banco e o período de retenção que precisa ser protegido, monitorado e removido conforme a política aplicável. Mantenha `false` salvo quando essa persistência for explicitamente necessária e houver uma política de retenção e controles de privacidade aprovados.
+
 O comando de inicialização definido no projeto executa `prisma migrate deploy` antes de iniciar o servidor. Portanto, migrações são aplicadas no startup e exigem que `DATABASE_URL` aponte para o banco correto antes do deploy. Não executar migrações manualmente por meio de contêineres ad hoc.
+
+Antes de qualquer deploy que possa aplicar migrações, faça um backup privado do banco, protegido e recuperável, e valide previamente o procedimento de restauração no ambiente apropriado. Planeje migrações como alterações aditivas e retrocompatíveis durante a janela em que versões antiga e nova possam coexistir; mudanças destrutivas devem ser postergadas para uma etapa posterior controlada.
 
 ## Rede e Ghost
 
@@ -57,7 +65,11 @@ Configure o Ghost para chamar a URL **interna** do serviço CapRover. O proxy n�
 1. Faça staging em uma app/ambiente isolado, usando variáveis de staging, porta interna `3000` e `/healthcheck`.
 2. Valide envio enfileirado, workers SQS, migrações e a integração Ghost pela URL interna antes da promoção.
 3. Promova somente a branch `caprover` após revisão da candidata e aprovação operacional.
-4. Para rollback, reimplante no CapRover o último commit conhecido como saudável da branch `caprover`; confirme `/healthcheck`, workers e migrações compatíveis. Não force-push, não use `main` como atalho e não altere produção durante a investigação.
+4. Para rollback, primeiro determine se o schema que recebeu `prisma migrate deploy` continua compatível com a imagem anterior. Rollback de código/imagem **não desfaz o schema**. Não reimplante código antigo contra schema incompatível. Se a reversão de schema for necessária, use somente o procedimento de restauração previamente validado e o backup privado feito antes do deploy; então confirme integridade dos dados, `/healthcheck`, workers e compatibilidade das migrações. Não force-push, não use `main` como atalho e não altere produção durante a investigação.
+
+## Reprodutibilidade do build
+
+O Dockerfile upstream executa `bun install` sem modo de lockfile congelado. Assim, o mesmo SHA de fonte pode resolver versões diferentes de dependências ainda permitidas e produzir imagens diferentes. Para cada build/deploy, registre o SHA exato de fonte construído e o identificador/digest da imagem resultante. A adoção de instalação congelada deve ser acompanhada como tarefa separada no upstream/fork; não modificar o Dockerfile nesta tarefa.
 
 ## Política sem Docker bruto
 
