@@ -58,6 +58,26 @@ describe('analytics keyset pagination', () => {
         expect(decodeEventsCursor(next.searchParams.get('cursor')!, 'asc')).toMatchObject({ id: 'b', created: '2026-01-01T00:00:00.000Z' })
     })
 
+    it('preserves a legacy empty page offset and filters without adding a cursor', async () => {
+        findMany.mockResolvedValue([])
+        const query = validateQueryParams(new URL(base).searchParams)
+        const result = await fetchAnalyticsEvents(query, 'site-1', base)
+        const next = new URL(result.paging.next)
+
+        expect(result.items).toEqual([])
+        expect(next.searchParams.get('start')).toBe('4')
+        expect(next.searchParams.get('cursor')).toBeNull()
+        expect(next.searchParams.get('event')).toBe('delivered OR opened')
+        expect(next.searchParams.get('begin')).toBe('10')
+        expect(next.searchParams.get('end')).toBe('20')
+        expect(next.searchParams.get('limit')).toBe('2')
+        expect(next.searchParams.get('ascending')).toBe('true')
+        expect(next.searchParams.get('tag')).toBe('campaign')
+
+        await fetchAnalyticsEvents(validateQueryParams(next.searchParams), 'site-1', next.toString())
+        expect(findMany.mock.calls[1][0].skip).toBe(4)
+    })
+
     it('uses the created/id lexicographic seek after duplicate timestamps without skip', async () => {
         const first = validateQueryParams(new URL(base).searchParams)
         findMany.mockResolvedValue([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])

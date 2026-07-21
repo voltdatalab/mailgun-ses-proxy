@@ -57,9 +57,11 @@ export function decodeEventsCursor(value: string, order: "asc" | "desc"): Events
 
 function getNextPageUrl(baseUrl: string, cursor?: EventsCursor) {
     const url = new URL(baseUrl)
-    // Offset is used solely for a legacy first page and must never be carried forward.
-    url.searchParams.delete("start")
-    if (cursor) url.searchParams.set("cursor", encodeEventsCursor(cursor))
+    if (cursor) {
+        // Offset is used solely for a legacy first page and must not accompany a cursor.
+        url.searchParams.delete("start")
+        url.searchParams.set("cursor", encodeEventsCursor(cursor))
+    }
     return url.toString()
 }
 
