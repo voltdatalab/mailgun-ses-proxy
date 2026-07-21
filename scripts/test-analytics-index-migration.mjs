@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { createConnection } from "mariadb"
+import { serializeExplainEvidence } from "./analytics-explain-evidence.mjs"
 
 const migration = await readFile(
   new URL("../prisma/migrations/20260721120000_add_ghost_analytics_indexes/migration.sql", import.meta.url),
@@ -54,7 +55,7 @@ async function seedNotifications(schema) {
 }
 async function explain(schema, sql, label) {
   const plan = await connection.query(`EXPLAIN ${sql}`)
-  console.log(`analytics ${label} EXPLAIN: ${JSON.stringify(plan)}`)
+  console.log(`analytics ${label} EXPLAIN: ${serializeExplainEvidence(plan)}`)
   return plan
 }
 function assertUsesAnalyticsIndex(plan, label) {
