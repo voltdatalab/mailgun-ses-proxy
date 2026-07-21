@@ -1,11 +1,17 @@
 import { DeleteMessageBatchCommand, type Message } from '@aws-sdk/client-sqs'
 import { describe, expect, it, vi } from 'vitest'
 import {
+    MAX_CONSECUTIVE_ERRORS,
+    _resetShutdownForTests,
     buildReceiveInput,
+    circuitBreakerAfterPoll,
+    consecutiveFailure,
     isHealthySqsPoll,
     normalizeSqsWorkerCount,
     processSqsMessage,
     processSqsMessages,
+    receiveSqsMessages,
+    requestShutdown,
 } from '@/lib/core/sqs-worker'
 
 const queueUrl = 'https://sqs.example.test/queue'
@@ -52,6 +58,49 @@ describe('SQS poll health policy', () => {
     it('requires an acknowledgement for a non-empty poll to be healthy', () => {
         expect(isHealthySqsPoll([message('one')], 0)).toBe(false)
         expect(isHealthySqsPoll([message('one')], 1)).toBe(true)
+    })
+})
+
+describe('SQS worker circuit breaker', () => {
+    it('opens after bounded consecutive poll failures', () => {
+        const failure = consecutiveFailure('worker', MAX_CONSECUTIVE_ERRORS - 1)
+
+        expect(failure.consecutiveErrors).toBe(MAX_CONSECUTIVE_ERRORS)
+        expect(failure.shouldExit).toBe(true)
+    })
+
+    it('opens after bounded non-empty zero-ACK batches', () => {
+        const failure = circuitBreakerAfterPoll('worker', [message('one')], 0, MAX_CONSECUTIVE_ERRORS - 1)
+
+        expect(isHealthySqsPoll([message('one')], 0)).toBe(false)
+        expect(failure.shouldExit).toBe(true)
+    })
+
+    it('does not reset processing failures after an empty poll', () => {
+        const result = circuitBreakerAfterPoll('worker', [], 0, 7)
+
+        expect(isHealthySqsPoll([], 0)).toBe(true)
+        expect(result).toEqual({ consecutiveErrors: 7, shouldExit: false })
+    })
+})
+
+describe('abortable SQS receives', () => {
+    it('aborts an active long poll when shutdown is requested', async () => {
+        const send = vi.fn((_command, options: { abortSignal?: AbortSignal }) => new Promise((_, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+                const error = new Error('request aborted')
+                error.name = 'AbortError'
+                reject(error)
+            }, { once: true })
+        }))
+        const receiving = receiveSqsMessages({ send } as any, buildReceiveInput(queueUrl, 30, 20, 1))
+
+        await vi.waitFor(() => expect(send).toHaveBeenCalledOnce())
+        requestShutdown()
+        await expect(receiving).rejects.toMatchObject({ name: 'AbortError' })
+        const options = send.mock.calls[0]?.[1] as { abortSignal?: AbortSignal } | undefined
+        expect(options?.abortSignal?.aborted).toBe(true)
+        _resetShutdownForTests()
     })
 })
 

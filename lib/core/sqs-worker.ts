@@ -12,18 +12,26 @@ import { heartbeat, markWorkerDead, registerWorker } from "./worker-registry"
 const log = logger.child({ module: "sqs-worker" })
 const POLL_BACKOFF_MIN_MS = 1_000
 const POLL_BACKOFF_MAX_MS = 30_000
-const MAX_CONSECUTIVE_ERRORS = 50
+export const MAX_CONSECUTIVE_ERRORS = 50
 const SQS_BATCH_LIMIT = 10
 let _shutdownRequested = false
+const activePollControllers = new Set<AbortController>()
 
 export function requestShutdown(): void {
     _shutdownRequested = true
-    log.info("Shutdown requested — workers will drain after current iteration")
+    for (const controller of activePollControllers) controller.abort()
+    log.info("Shutdown requested — active polls aborted and in-flight handlers will drain")
 }
 
 /** Visible for testing. */
 export function _isShutdownRequested(): boolean {
     return _shutdownRequested
+}
+
+/** Test-only reset for isolated worker-loop tests. */
+export function _resetShutdownForTests(): void {
+    _shutdownRequested = false
+    activePollControllers.clear()
 }
 
 export interface WorkerConfig {
@@ -55,6 +63,33 @@ export function isHealthySqsPoll(messages: Message[] | undefined, acknowledged: 
     return !messages || messages.length === 0 || acknowledged > 0
 }
 
+/**
+ * Records every processing or polling failure through the same bounded circuit
+ * breaker. Callers must exit their loop when `shouldExit` is true.
+ */
+export function consecutiveFailure(name: string, previousFailures: number): { consecutiveErrors: number, shouldExit: boolean } {
+    const consecutiveErrors = previousFailures + 1
+    const shouldExit = consecutiveErrors >= MAX_CONSECUTIVE_ERRORS
+    if (shouldExit) {
+        const reason = `Worker ${name} hit ${MAX_CONSECUTIVE_ERRORS} consecutive errors — exiting loop`
+        log.error({ name }, reason)
+        markWorkerDead(name, reason)
+    }
+    return { consecutiveErrors, shouldExit }
+}
+
+/** Applies ACK-based recovery without letting idle long-polls erase failures. */
+export function circuitBreakerAfterPoll(
+    name: string,
+    messages: Message[] | undefined,
+    acknowledged: number,
+    previousFailures: number,
+): { consecutiveErrors: number, shouldExit: boolean } {
+    if (!messages || messages.length === 0) return { consecutiveErrors: previousFailures, shouldExit: false }
+    if (acknowledged > 0) return { consecutiveErrors: 0, shouldExit: false }
+    return consecutiveFailure(name, previousFailures)
+}
+
 /** Exported test seam for the exact ReceiveMessageCommand input. */
 export function buildReceiveInput(queueUrl: string, visibilityTimeout: number, waitTimeSeconds: number, batchSize?: number) {
     return {
@@ -67,6 +102,21 @@ export function buildReceiveInput(queueUrl: string, visibilityTimeout: number, w
         MaxNumberOfMessages: normalizeSqsWorkerCount(batchSize),
         // Preserve long polling; empty responses do not spin the loop.
         WaitTimeSeconds: waitTimeSeconds,
+    }
+}
+
+/** Sends one abortable SQS ReceiveMessage request and deregisters it on settle. */
+export async function receiveSqsMessages(
+    client: ReturnType<typeof sqsClient>,
+    receiveInput: ReturnType<typeof buildReceiveInput>,
+): Promise<Message[] | undefined> {
+    const controller = new AbortController()
+    activePollControllers.add(controller)
+    try {
+        const response = await client.send(new ReceiveMessageCommand(receiveInput), { abortSignal: controller.signal })
+        return response.Messages
+    } finally {
+        activePollControllers.delete(controller)
     }
 }
 
@@ -100,42 +150,43 @@ export async function startWorker(config: WorkerConfig) {
             try {
                 let messages: Message[] | undefined
                 try {
-                    const response = await client.send(new ReceiveMessageCommand(receiveInput))
-                    messages = response.Messages
+                    messages = await receiveSqsMessages(client, receiveInput)
                     pollBackoffMs = POLL_BACKOFF_MIN_MS
                 } catch (pollError) {
-                    log.error({ name, errorClass: errorClass(pollError) }, `Poll error — retrying in ${pollBackoffMs}ms`)
+                    if (_shutdownRequested && isAbortError(pollError)) break
+                    const failure = consecutiveFailure(name, consecutiveErrors)
+                    consecutiveErrors = failure.consecutiveErrors
+                    log.error({ name, errorClass: errorClass(pollError), consecutiveErrors }, `Poll error — retrying in ${pollBackoffMs}ms`)
+                    if (failure.shouldExit) return
                     await sleep(pollBackoffMs)
                     pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
-                    consecutiveErrors++
                     continue
                 }
 
+                // A message received concurrently with SIGTERM stays unACKed.
+                if (_shutdownRequested) break
                 if (!messages || messages.length === 0) {
                     // ReceiveMessage remains a long-poll request, so this does not busy-loop.
-                    if (isHealthySqsPoll(messages, 0)) heartbeat(name)
-                    consecutiveErrors = 0
+                    heartbeat(name)
+                    // An idle long-poll proves liveness, but not processing recovery.
                     continue
                 }
 
                 const acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
                 // A non-empty poll is healthy only after a confirmed batch-delete entry.
+                const circuit = circuitBreakerAfterPoll(name, messages, acknowledged, consecutiveErrors)
+                consecutiveErrors = circuit.consecutiveErrors
                 if (isHealthySqsPoll(messages, acknowledged)) {
                     heartbeat(name)
-                    consecutiveErrors = 0
                 } else {
-                    consecutiveErrors++
                     log.warn({ name, consecutiveErrors }, "No messages in batch acknowledged — incrementing error counter")
+                    if (circuit.shouldExit) return
                 }
             } catch (loopError) {
-                consecutiveErrors++
+                const failure = consecutiveFailure(name, consecutiveErrors)
+                consecutiveErrors = failure.consecutiveErrors
                 log.error({ name, errorClass: errorClass(loopError), consecutiveErrors }, `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`)
-                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                    const reason = `Worker ${name} hit ${MAX_CONSECUTIVE_ERRORS} consecutive errors — exiting loop`
-                    log.error({ name }, reason)
-                    markWorkerDead(name, reason)
-                    return
-                }
+                if (failure.shouldExit) return
                 await sleep(pollBackoffMs)
                 pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
             }
@@ -191,7 +242,8 @@ async function processWithConcurrency(
     let next = 0
     const workerCount = Math.min(messages.length, normalizeSqsWorkerCount(maxConcurrency))
     await Promise.all(Array.from({ length: workerCount }, async () => {
-        while (next < messages.length) {
+        // On shutdown, existing handlers drain but queued batch items are left for SQS.
+        while (!_shutdownRequested && next < messages.length) {
             const message = messages[next++]
             try {
                 await handler(message)
@@ -214,8 +266,8 @@ async function deleteMessageBatch(
     try {
         const response = await client.send(new DeleteMessageBatchCommand({ QueueUrl: queueUrl, Entries: entries }))
         const acknowledged = new Set(response.Successful?.map(entry => entry.Id).filter((id): id is string => Boolean(id)))
-        const failed = (response.Failed?.length ?? 0)
-        if (failed > 0) log.warn({ failed }, "Some SQS batch delete entries failed")
+        const failed = response.Failed?.map(({ Code, SenderFault }) => ({ Code, SenderFault })) ?? []
+        if (failed.length > 0) log.warn({ failed: failed.length, failures: failed }, "Some SQS batch delete entries failed")
         return entries.reduce((count, entry) => count + (acknowledged.has(entry.Id) ? 1 : 0), 0)
     } catch (error) {
         log.warn({ count: entries.length, errorClass: errorClass(error) }, "SQS batch delete request failed")
@@ -234,6 +286,10 @@ function bootstrapWorker(name: string, queueUrl: string): ReturnType<typeof sqsC
         log.error({ name, errorClass: errorClass(error) }, "[bootstrap] SQS client init failed — worker will not start")
         return null
     }
+}
+
+function isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === "AbortError"
 }
 
 function errorClass(error: unknown): string {

@@ -44,12 +44,13 @@ describe('background SQS worker configuration', () => {
     it.each([
         ['newsletter events', processNewsletterEventsQueue, 'newsletter-events', 'newsletter-events-url', mocks.handleNewsletterEmailEvent],
         ['system events', processSystemEventsQueue, 'system-events', 'system-events-url', mocks.handleSystemEmailEvent],
-    ])('starts %s with a 10-message, 10-handler pool', async (_label, start, name, queueUrl, handler) => {
+    ])('starts %s with a 10-message, 10-handler pool and a conservative visibility deadline', async (_label, start, name, queueUrl, handler) => {
         await start()
 
         expect(mocks.startWorker).toHaveBeenCalledWith(expect.objectContaining({
             name,
             queueUrl,
+            visibilityTimeout: 120,
             batchSize: 10,
             maxConcurrency: 10,
             handler,
