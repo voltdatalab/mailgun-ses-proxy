@@ -1,12 +1,9 @@
 import { DashboardBootstrapError, verifyPassword, createSession, setSessionCookie, ensureBootstrapUser } from "@/lib/dashboard/auth"
+import { errorClass } from "@/lib/core/error-class"
 import logger from "@/lib/core/logger"
 import { prisma } from "@/lib/database"
 
 const log = logger.child({ module: "dashboard/api/login" })
-
-function errorClass(error: unknown): string {
-    return error instanceof Error && error.name ? error.name : "UnknownError"
-}
 
 export async function POST(req: Request) {
     try {

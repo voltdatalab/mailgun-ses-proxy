@@ -5,6 +5,7 @@ const dashboardUser = {
     findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
 }
 
 vi.mock("next/headers", () => ({ cookies: vi.fn() }))
@@ -69,8 +70,41 @@ describe("dashboard bootstrap security", () => {
         expect(dashboardUser.update.mock.calls[0][0].data.password).not.toContain(process.env.DASHBOARD_INITIAL_ADMIN_PASSWORD)
     })
 
+    it("removes only the legacy account when the configured account already exists", async () => {
+        process.env.DASHBOARD_INITIAL_ADMIN_EMAIL = "operator@example.com"
+        process.env.DASHBOARD_INITIAL_ADMIN_PASSWORD = "sixteen-character-password"
+        dashboardUser.count.mockResolvedValue(2)
+        dashboardUser.findUnique
+            .mockResolvedValueOnce({ id: "legacy-user", email: "admin@localhost", password: "legacy" })
+            .mockResolvedValueOnce({ id: "configured-user", email: "operator@example.com", password: "hash" })
+        dashboardUser.delete.mockResolvedValue({ id: "legacy-user" })
+        const { ensureBootstrapUser } = await import("@/lib/dashboard/auth")
+        await ensureBootstrapUser()
+        expect(dashboardUser.delete).toHaveBeenCalledWith({ where: { id: "legacy-user" } })
+        expect(dashboardUser.update).not.toHaveBeenCalled()
+        expect(dashboardUser.create).not.toHaveBeenCalled()
+    })
+
+    it("fails closed when removing the legacy account fails", async () => {
+        process.env.DASHBOARD_INITIAL_ADMIN_EMAIL = "operator@example.com"
+        process.env.DASHBOARD_INITIAL_ADMIN_PASSWORD = "sixteen-character-password"
+        dashboardUser.count.mockResolvedValue(2)
+        dashboardUser.findUnique
+            .mockResolvedValueOnce({ id: "legacy-user", email: "admin@localhost", password: "legacy" })
+            .mockResolvedValueOnce({ id: "configured-user", email: "operator@example.com", password: "hash" })
+        dashboardUser.delete.mockRejectedValue(new Error("database failure"))
+        const { ensureBootstrapUser, DashboardBootstrapError } = await import("@/lib/dashboard/auth")
+        await expect(ensureBootstrapUser()).rejects.toBeInstanceOf(DashboardBootstrapError)
+    })
+
     it("cannot mint a session when the JWT secret is absent", async () => {
         const { createSession } = await import("@/lib/dashboard/auth")
         await expect(createSession("user", "operator@example.com", "Operator")).rejects.toThrow("Dashboard bootstrap is not configured")
+    })
+
+    it("rejects JWT secrets shorter than 32 characters", async () => {
+        process.env.DASHBOARD_JWT_SECRET = "too-short"
+        const { createSession, DashboardBootstrapError } = await import("@/lib/dashboard/auth")
+        await expect(createSession("user", "operator@example.com", "Operator")).rejects.toBeInstanceOf(DashboardBootstrapError)
     })
 })

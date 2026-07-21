@@ -5,6 +5,7 @@ const COOKIE_NAME = "dashboard_token"
 const SESSION_DURATION = 24 * 60 * 60 // 24 hours in seconds
 const LEGACY_ADMIN_EMAIL = "admin@localhost"
 const MIN_BOOTSTRAP_PASSWORD_LENGTH = 16
+const MIN_DASHBOARD_JWT_SECRET_LENGTH = 32
 
 export class DashboardBootstrapError extends Error {
     constructor() {
@@ -15,8 +16,12 @@ export class DashboardBootstrapError extends Error {
 
 function dashboardJwtSecret(): string {
     const secret = process.env.DASHBOARD_JWT_SECRET
-    if (!secret) throw new DashboardBootstrapError()
+    if (!secret || secret.length < MIN_DASHBOARD_JWT_SECRET_LENGTH) throw new DashboardBootstrapError()
     return secret
+}
+
+export function hasValidDashboardJwtSecret(): boolean {
+    return (process.env.DASHBOARD_JWT_SECRET?.length ?? 0) >= MIN_DASHBOARD_JWT_SECRET_LENGTH
 }
 
 function bootstrapCredentials(): { email: string; password: string } {
@@ -122,7 +127,7 @@ export function clearSessionCookie(response: Response): void {
     response.headers.append("Set-Cookie", `${COOKIE_NAME}=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0${secure}`)
 }
 
-/** Creates the configured first user or replaces a legacy default user before authentication. */
+/** Creates the configured first user or removes the known legacy default user before authentication. */
 export async function ensureBootstrapUser(): Promise<void> {
     const [count, legacyUser] = await Promise.all([
         prisma.dashboardUser.count(),
@@ -134,6 +139,11 @@ export async function ensureBootstrapUser(): Promise<void> {
     const passwordHash = await hashPassword(password)
     try {
         if (legacyUser) {
+            const configuredUser = await prisma.dashboardUser.findUnique({ where: { email } })
+            if (configuredUser && configuredUser.id !== legacyUser.id) {
+                await prisma.dashboardUser.delete({ where: { id: legacyUser.id } })
+                return
+            }
             await prisma.dashboardUser.update({ where: { id: legacyUser.id }, data: { email, password: passwordHash } })
         } else {
             await prisma.dashboardUser.create({ data: { email, password: passwordHash, name: "Admin" } })

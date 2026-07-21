@@ -50,7 +50,7 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 
 ### Bootstrap seguro do dashboard
 
-`DASHBOARD_JWT_SECRET` é obrigatório para assinar e verificar sessões. Defina também `DASHBOARD_INITIAL_ADMIN_EMAIL` com um email válido e não vazio e `DASHBOARD_INITIAL_ADMIN_PASSWORD` com pelo menos 16 caracteres. Em banco vazio, o primeiro login cria somente essa conta configurada. Se existir uma linha de credencial legada, ela é substituída por esse email e uma nova hash da senha configurada antes de autenticar. Valores ausentes/fracos bloqueiam login com resposta genérica 503 e não criam conta.
+`DASHBOARD_JWT_SECRET` é obrigatório para assinar e verificar sessões e deve ter pelo menos 32 caracteres. Defina também `DASHBOARD_INITIAL_ADMIN_EMAIL` com um email válido e não vazio e `DASHBOARD_INITIAL_ADMIN_PASSWORD` com pelo menos 16 caracteres. Em banco vazio, o primeiro login cria somente essa conta configurada. A remediação legada reconhece somente a linha histórica `admin@localhost`: ela é atualizada para essas credenciais; se a conta configurada já existir, somente a linha legada é removida. Valores ausentes/fracos ou falha ao remover a linha legada bloqueiam login com resposta genérica 503 e não criam conta.
 
 Nunca passe credenciais iniciais em Git, logs ou UI. A rotação posterior ocorre somente por rota de configurações autenticada; o endpoint de login ignora campos de troca de credenciais. No preflight de produção, confirme a presença dos três secrets e que não resta conta legada no banco.
 

@@ -43,7 +43,7 @@ describe('GET /v3/[siteId]/events error handling', () => {
 
         expect(response.status).toBe(500)
         expect(await response.json()).toEqual({ message: 'Unable to fetch analytics events' })
-        expect(error).toHaveBeenCalledWith({ errorClass: 'Error', siteId: 'site-1' }, 'error when fetching analytics events')
+        expect(error).toHaveBeenCalledWith({ errorClass: 'Error' }, 'error when fetching analytics events')
         expect(JSON.stringify(error.mock.calls)).not.toContain('SQLSTATE')
     })
 })

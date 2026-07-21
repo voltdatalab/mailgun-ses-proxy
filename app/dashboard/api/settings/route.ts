@@ -1,4 +1,5 @@
 import { getSessionFromCookies, hashPassword } from "@/lib/dashboard/auth"
+import { errorClass } from "@/lib/core/error-class"
 import logger from "@/lib/core/logger"
 import { prisma } from "@/lib/database"
 
@@ -34,8 +35,7 @@ export async function GET() {
 
         return Response.json({ settings })
     } catch (error) {
-        const errorClass = error instanceof Error && error.name ? error.name : "UnknownError"
-        log.error({ errorClass }, "Settings GET error")
+        log.error({ errorClass: errorClass(error) }, "Settings GET error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }
@@ -79,8 +79,7 @@ export async function PUT(req: Request) {
         log.info({ count: operations.length, credentialsUpdated: Boolean(credentials) }, "Settings updated")
         return Response.json({ ok: true, updated: operations.length, credentialsUpdated: Boolean(credentials) })
     } catch (error) {
-        const errorClass = error instanceof Error && error.name ? error.name : "UnknownError"
-        log.error({ errorClass }, "Settings PUT error")
+        log.error({ errorClass: errorClass(error) }, "Settings PUT error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }

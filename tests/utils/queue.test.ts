@@ -87,7 +87,7 @@ describe("TaskQueue Class", () => {
     expect(stats.failedItems).toContain("f1");
   });
 
-  it("logs only a safe error class and item ID when an item fails", async () => {
+  it("logs only a safe error class when an item fails", async () => {
     log.warn.mockClear();
     const queue = new TaskQueue({ rateLimit: 1000, maxConcurrent: 10 });
     const privateMessage = "private failure message";
@@ -100,7 +100,7 @@ describe("TaskQueue Class", () => {
     await queue.waitUntilFinished();
 
     expect(log.warn).toHaveBeenCalledWith(
-      { errorClass: "Error", itemId: "safe-item-id" },
+      { errorClass: "Error" },
       "Queue item failed",
     );
 

@@ -1,4 +1,5 @@
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { fetchAnalyticsEvents, QueryValidationError, validateQueryParams } from "@/service/events-service/events-utils"
 import { NextRequest } from "next/server"
 
@@ -19,16 +20,14 @@ type pathParam = { params: Promise<{ siteId: string, slug?: string[] }> }
  * 
  */
 async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
-    const { siteId, slug } = await params
+    const { siteId } = await params
     try {
         const queryParams = validateQueryParams(req.nextUrl.searchParams)
-        log.debug({ queryParams, siteId, slug }, "query params")
         const events = await fetchAnalyticsEvents(queryParams, siteId, req.url)
-        log.debug({ count: events.items.length, siteId, slug }, "analytics events count")
+        log.debug({ count: events.items.length }, "analytics events count")
         return Response.json(events, { status: 200 })
     } catch (e) {
-        const errorClass = e instanceof Error ? e.constructor.name : "UnknownError"
-        log.error({ errorClass, siteId }, "error when fetching analytics events")
+        log.error({ errorClass: errorClass(e) }, "error when fetching analytics events")
         if (e instanceof QueryValidationError) {
             return Response.json({ message: e.message }, { status: 400 })
         }

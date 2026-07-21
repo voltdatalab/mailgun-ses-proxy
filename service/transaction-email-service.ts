@@ -1,4 +1,5 @@
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { prisma } from "@/service/database/db"
 import { MessageTag, SendEmailCommand } from "@aws-sdk/client-sesv2"
 import { sesSystemClient } from "./aws/awsHelper"
@@ -40,7 +41,13 @@ export async function sendSystemMail(email: EmailPayload) {
 
     const mail = formatEmail(email, [{ Name: 'transactional-email', Value: 'true' }])
     const cmd = new SendEmailCommand(mail)
-    const resp = await sesSystemClient().send(cmd)
+    let resp: { MessageId?: string }
+    try {
+        resp = await sesSystemClient().send(cmd)
+    } catch (error) {
+        log.error({ errorClass: errorClass(error) }, "failed to send system mail")
+        throw error
+    }
 
     if (resp.MessageId) {
         const { id } = await prisma.systemMails.create({
@@ -53,11 +60,11 @@ export async function sendSystemMail(email: EmailPayload) {
                 contents: email.html,
             }
         })
-        log.info({ resp, to: email.to }, "sending system mail, SES response")
+        log.info("system mail sent")
         return { messageId: resp.MessageId, dbId: id }
     }
 
-    log.error({ resp, email }, "failed to send system mail")
+    log.error({ errorClass: "MissingMessageId" }, "failed to send system mail")
     throw new Error("Failed to send email")
 }
 

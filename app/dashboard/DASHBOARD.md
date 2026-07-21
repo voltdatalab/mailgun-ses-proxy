@@ -57,12 +57,12 @@ npx prisma migrate dev --name add_dashboard_tables
 Before the dashboard can authenticate, configure these secrets in the deployment environment:
 
 ```
-DASHBOARD_JWT_SECRET=<random session-signing secret>
+DASHBOARD_JWT_SECRET=<random-session-signing-secret-with-at-least-32-characters>
 DASHBOARD_INITIAL_ADMIN_EMAIL=operator@example.com
 DASHBOARD_INITIAL_ADMIN_PASSWORD=<at-least-16-character-secret>
 ```
 
-The initial email must be nonempty and syntactically valid; the initial password must be at least 16 characters. On an empty database, login creates only this configured account. If a legacy default-account row is found, it is remediated to these configured credentials before any authentication. Missing or weak bootstrap values fail closed and login returns a generic 503 response.
+The JWT secret must be at least 32 characters. The initial email must be nonempty and syntactically valid; the initial password must be at least 16 characters. On an empty database, login creates only this configured account. Legacy remediation recognizes only the former `admin@localhost` row: it is remediated to the configured credentials unless that configured account already exists, in which case only the legacy row is deleted. Missing or weak bootstrap values, including a failed legacy deletion, fail closed and login returns a generic 503 response.
 
 Credential rotation is performed through the authenticated settings flow; login never accepts replacement credential fields. Production preflight must confirm that no legacy default account remains.
 

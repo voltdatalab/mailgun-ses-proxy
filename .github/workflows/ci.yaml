@@ -16,7 +16,7 @@ concurrency:
 
 env:
   DATABASE_URL: mysql://ci:ci-password@127.0.0.1:3306/mailgun_ci
-  DASHBOARD_JWT_SECRET: ci-dashboard-secret-not-for-production
+  DASHBOARD_JWT_SECRET: ci-dashboard-session-signing-secret-not-for-production
   API_KEY: ci-api-key
 
 jobs:

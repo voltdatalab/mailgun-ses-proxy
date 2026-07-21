@@ -1,15 +1,12 @@
 import { ApiResponse } from "@/lib/api-response"
 import { formDataToObject } from "@/lib/core/common"
+import { errorClass } from "@/lib/core/error-class"
 import logger from "@/lib/core/logger"
 import { addNewsletterToQueue } from "@/service/newsletter-service"
 import { MailgunMessage } from "@/types/mailgun"
 
 const log = logger.child({ module: "app:v3:messages" })
 type pathParam = { params: Promise<{ siteId: string }> }
-
-function errorClass(error: unknown): string {
-    return error instanceof Error && error.name ? error.name : "UnknownError"
-}
 
 export async function POST(req: Request, { params }: pathParam) {
     const { siteId } = await params

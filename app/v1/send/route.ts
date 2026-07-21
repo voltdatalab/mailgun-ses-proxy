@@ -1,5 +1,6 @@
 import { ApiResponse } from "@/lib/api-response"
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { sendSystemMail } from "@/service/transaction-email-service"
 import { ValidationService, type EmailPayload } from "@/service/validation-service/validation"
 import { NextRequest } from "next/server"
@@ -34,18 +35,14 @@ export async function POST(req: NextRequest): Promise<Response> {
         // Validate payload structure
         const validation = ValidationService.validateEmailPayload(payload)
         if (!validation?.data) {
-            requestLog.warn({ errors: validation.errors }, "Email validation failed")
+            requestLog.warn({ errorCount: validation.errors.length }, "Email validation failed")
             return ApiResponse.validationError(`Validation failed: ${validation.errors.join("; ")}`)
         }
 
         // Execute send
         const { messageId } = await sendSystemMail(validation.data)
         
-        requestLog.info({ 
-            messageId, 
-            to: validation.data.to, 
-            subject: validation.data.subject 
-        }, "System email sent")
+        requestLog.info("System email sent")
 
         return ApiResponse.success({
             messageId,
@@ -54,7 +51,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         })
     } catch (error) {
         const message = error instanceof Error ? error.message : "An unexpected error occurred"
-        requestLog.error({ error: message }, "Failed to process system email")
+        requestLog.error({ errorClass: errorClass(error) }, "Failed to process system email")
         
         // Generic errors and config errors (like missing 'from') return 500
         return ApiResponse.internalError(message)

@@ -1,5 +1,6 @@
 import { getSessionFromCookies } from "@/lib/dashboard/auth"
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { prisma } from "@/lib/database"
 
 const log = logger.child({ module: "dashboard/api/stats" })
@@ -87,7 +88,7 @@ export async function GET() {
             })),
         })
     } catch (error) {
-        log.error(error, "Stats API error")
+        log.error({ errorClass: errorClass(error) }, "Stats API error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }

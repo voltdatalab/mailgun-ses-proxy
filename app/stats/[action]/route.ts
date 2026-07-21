@@ -1,4 +1,5 @@
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { getNewsletterUsage } from "@/service/stats-service"
 
 const log = logger.child({ module: "app/stats/[action]" })
@@ -19,7 +20,7 @@ export async function POST(req: Request, { params }: pathParam) {
         if (error instanceof SyntaxError) {
             return Response.json({ message: "Invalid JSON in request body" }, { status: 400 })
         }
-        log.error(error, "Error in stats route")
+        log.error({ errorClass: errorClass(error) }, "Error in stats route")
         return Response.json({ message: "Internal server error" }, { status: 500 })
     }
 }

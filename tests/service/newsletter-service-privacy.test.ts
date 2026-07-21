@@ -91,7 +91,7 @@ describe('newsletter service privacy and retry behavior', () => {
         }
     })
 
-    it('throws when the referenced newsletter batch is absent so the message is not ACKed', async () => {
+    it('logs an absent batch without identifiers so the message is not ACKed', async () => {
         mocks.getNewsletterContent.mockResolvedValue(null)
         const message = {
             MessageId: 'safe-message-id',
@@ -103,10 +103,7 @@ describe('newsletter service privacy and retry behavior', () => {
         } as Message
 
         await expect(validateAndSend(message)).rejects.toThrow('Newsletter batch not found')
-        expect(mocks.log.error).toHaveBeenCalledWith(
-            { newsletterBatchId: 'newsletter-batch-123', siteId: 'site-123' },
-            'Newsletter batch not found in DB; leaving message for retry/redrive',
-        )
+        expect(mocks.log.error).toHaveBeenCalledWith('Newsletter batch not found in DB; leaving message for retry/redrive')
     })
 
     it('logs SES failures with identifiers and errorClass only, never recipient data', async () => {
@@ -125,14 +122,14 @@ describe('newsletter service privacy and retry behavior', () => {
                 from: { DataType: 'String', StringValue: from },
                 siteId: { DataType: 'String', StringValue: 'site-123' },
             },
-        } as Message)).rejects.toThrow('1/1 emails failed in batch batch-safe-id')
+        } as Message)).rejects.toThrow('1/1 emails failed')
 
         const sesLog = mocks.log.error.mock.calls.find(([, message]) => message === 'SES send failed')
-        expect(sesLog?.[0]).toMatchObject({ errorClass: 'Error', siteId: 'site-123' })
+        expect(sesLog?.[0]).toEqual({ errorClass: 'Error' })
         expect(sesLog?.[0]).not.toHaveProperty('err')
         expect(sesLog?.[0]).not.toHaveProperty('toEmail')
         const output = loggedMetadata()
-        for (const secret of [recipient, body, receiptHandle, from, 'SES credential secret']) {
+        for (const secret of [recipient, body, receiptHandle, from, 'SES credential secret', 'batch-safe-id', 'newsletter-batch-123', 'site-123']) {
             expect(output).not.toContain(secret)
         }
     })
