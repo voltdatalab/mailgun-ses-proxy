@@ -11,8 +11,6 @@ import { heartbeat, markWorkerDead, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
 
-// Messages received more than this many times are discarded as poison-pills.
-const MAX_RECEIVE_COUNT = 3
 
 // Exponential back-off bounds for transient poll errors (ms).
 const POLL_BACKOFF_MIN_MS = 1_000
@@ -55,7 +53,7 @@ interface WorkerConfig {
  *  - handler resolves → message deleted
  *  - handler throws   → message left in SQS for retry
  *  - poll error       → exponential back-off, loop continues
- *  - receiveCount > MAX_RECEIVE_COUNT → deleted without calling handler
+ *  - failed messages are left for the queue's redrive/DLQ policy
  *  - unexpected loop error → logged, backoff, loop continues (circuit-breaker exits after MAX_CONSECUTIVE_ERRORS)
  */
 export async function startWorker(config: WorkerConfig) {
@@ -70,7 +68,7 @@ export async function startWorker(config: WorkerConfig) {
     const client = bootstrapWorker(name, queueUrl)
     if (!client) return
 
-    log.info({ name, queueUrl }, `Starting SQS worker: ${name}`)
+    log.info({ name }, `Starting SQS worker: ${name}`)
     registerWorker(name)
 
     const receiveInput = {
@@ -118,29 +116,8 @@ export async function startWorker(config: WorkerConfig) {
                 let anyHandlerSuccess = false
 
                 for (const message of messages) {
-                    const receiveCount = parseInt(
-                        message.Attributes?.ApproximateReceiveCount ?? "0",
-                        10
-                    )
-
-                    if (receiveCount > MAX_RECEIVE_COUNT) {
-                        log.error(
-                            { name, messageId: message.MessageId, receiveCount },
-                            "Message exceeded max receive count — discarding"
-                        )
-                        await deleteMessage(client, queueUrl, message)
-                        continue
-                    }
-
-                    try {
-                        await handler(message)
-                        await deleteMessage(client, queueUrl, message)
+                    if (await processSqsMessage(client, queueUrl, message, handler, name)) {
                         anyHandlerSuccess = true
-                    } catch (handlerError) {
-                        log.error(
-                            { name, messageId: message.MessageId, receiveCount, err: handlerError },
-                            "Handler error — message left in SQS for retry"
-                        )
                     }
                 }
 
@@ -188,6 +165,36 @@ export async function startWorker(config: WorkerConfig) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Processes one received message. A failed handler is deliberately not
+ * acknowledged: SQS visibility/redrive policy controls subsequent retries and
+ * DLQ delivery.
+ */
+export async function processSqsMessage(
+    client: ReturnType<typeof sqsClient>,
+    queueUrl: string,
+    message: Message,
+    handler: (message: Message) => Promise<void>,
+    name = "worker"
+): Promise<boolean> {
+    try {
+        await handler(message)
+        await deleteMessage(client, queueUrl, message)
+        return true
+    } catch (handlerError) {
+        log.error(
+            {
+                name,
+                messageId: message.MessageId,
+                receiveCount: message.Attributes?.ApproximateReceiveCount,
+                err: handlerError,
+            },
+            "Handler error — message left in SQS for retry/redrive"
+        )
+        return false
+    }
+}
 
 /** Validates config and initialises the SQS client. Returns null if setup fails. */
 function bootstrapWorker(name: string, queueUrl: string): ReturnType<typeof sqsClient> | null {

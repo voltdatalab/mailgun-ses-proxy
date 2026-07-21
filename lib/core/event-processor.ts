@@ -19,8 +19,8 @@ export function createEventProcessor(config: EventProcessorConfig) {
 
     return async (message: Message) => {
         if (!message.Body || !message.MessageId) {
-            log.warn({ name }, "Empty SQS message — discarding")
-            return
+            log.warn({ name }, "Invalid SQS event message")
+            throw new Error("Invalid SQS event message")
         }
 
         const result = parseNotificationEvent(message.MessageId, message.Body)

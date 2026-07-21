@@ -62,6 +62,10 @@ Configure o Ghost para chamar a URL **interna** do serviço CapRover. O proxy n�
 
 ## Staging, promoção e rollback
 
+## SQS: redrive, DLQ e retenção
+
+Antes de promover para produção a versão que não descarta manualmente mensagens com falha, configure uma política de redrive com DLQ em **todas** as filas SQS relevantes. A DLQ deve ter retenção adequada para investigação e recuperação, e alertas devem cobrir mensagens recebidas/enviadas à DLQ e sua profundidade. Falhas de processamento permanecem na fila para que a política SQS faça as tentativas e o redrive; não trate a ausência dessa configuração como proteção suficiente em produção.
+
 1. Faça staging em uma app/ambiente isolado, usando variáveis de staging, porta interna `3000` e `/healthcheck`.
 2. Valide envio enfileirado, workers SQS, migrações e a integração Ghost pela URL interna antes da promoção.
 3. Promova somente a branch `caprover` após revisão da candidata e aprovação operacional.
