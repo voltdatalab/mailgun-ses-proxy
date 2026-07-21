@@ -22,10 +22,18 @@ function fail(message: string): never {
 
 function parseInteger(value: string | null, key: string, fallback?: number) {
     if (value === null && fallback !== undefined) return fallback
-    if (value === null || value.trim() === "") fail(`Invalid query parameter: ${key}`)
+    // Do not let Number() accept non-decimal forms such as 1e3, 0x10, or Infinity.
+    if (value === null || !/^-?\d+$/.test(value)) fail(`Invalid query parameter: ${key}`)
     const parsed = Number(value)
-    if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) fail(`Invalid query parameter: ${key}`)
+    if (!Number.isSafeInteger(parsed)) fail(`Invalid query parameter: ${key}`)
     return parsed
+}
+
+function parseUnixSeconds(value: string | null, key: "begin" | "end") {
+    const seconds = parseInteger(value, key)
+    const date = new Date(seconds * 1000)
+    if (!Number.isFinite(date.getTime())) fail(`Invalid query parameter: ${key}`)
+    return seconds
 }
 
 function encodeEventsCursor(cursor: EventsCursor) {
@@ -76,6 +84,8 @@ export async function getEmailEvents(params: EventsProps) {
         lt: new Date(params.end * 1000),
     }
     const cursor = params.cursor
+    // This keyset is stable and duplicate-free only for a fixed result set; it is not cross-request snapshot isolation.
+    // A concurrent insert at the cursor's exact created timestamp may sort behind a random UUID cursor and be recovered by polling/deduplication.
     const seek = cursor && {
         OR: params.order === "asc"
             ? [
@@ -123,8 +133,8 @@ export function validateQueryParams(searchParams: URLSearchParams): QueryParams 
     const start = parseInteger(searchParams.get("start"), "start", 0)
     if (start < 0) fail("Invalid query parameter: start")
 
-    const begin = parseInteger(searchParams.get("begin"), "begin")
-    const end = parseInteger(searchParams.get("end"), "end")
+    const begin = parseUnixSeconds(searchParams.get("begin"), "begin")
+    const end = parseUnixSeconds(searchParams.get("end"), "end")
     if (begin >= end) fail("Invalid query parameter: begin/end")
 
     const ascending = searchParams.get("ascending")

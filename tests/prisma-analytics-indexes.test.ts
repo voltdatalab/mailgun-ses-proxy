@@ -8,6 +8,7 @@ const migration = readFileSync(
   path.join(root, "prisma/migrations/20260721120000_add_ghost_analytics_indexes/migration.sql"),
   "utf8",
 )
+const operations = readFileSync(path.join(root, "docs/CAPROVER_OPERATIONS.md"), "utf8")
 
 const indexes = [
   {
@@ -33,6 +34,12 @@ const preflightBlock = (index: (typeof indexes)[number]) => {
 }
 
 describe("Ghost analytics indexes", () => {
+  it("requires Task 12/14 to EXPLAIN multi-type OR analytics queries", () => {
+    expect(operations).toContain("Task 12/14")
+    expect(operations).toContain("event=delivered OR opened")
+    expect(operations).toContain("filesort/merge")
+  })
+
   it("declares the exact nonredundant indexes used by analytics queries", () => {
     expect(schema).toMatch(/model NewsletterNotifications\s*\{[\s\S]*?@@index\(\[type, created, id\], map: "idx_notifications_type_created_id"\)/)
     expect(schema).toMatch(/model NewsletterBatch\s*\{[\s\S]*?@@index\(\[siteId\], map: "NewsletterBatch_siteId_idx"\)/)

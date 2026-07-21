@@ -42,6 +42,24 @@ describe('analytics keyset pagination', () => {
         ]) expect(() => validateQueryParams(new URL(`https://x.test/?${query}`).searchParams)).toThrow(QueryValidationError)
     })
 
+    it('accepts only safe base-10 integer query values and date-representable bounds', () => {
+        const invalidQueries = [
+            'event=delivered&begin=1e3&end=2000',
+            'event=delivered&begin=0x10&end=20',
+            'event=delivered&begin=1&end=2&start=1e3',
+            'event=delivered&begin=1&end=2&limit=0x10',
+            'event=delivered&begin=9007199254740992&end=9007199254740993',
+            'event=delivered&begin=1&end=9007199254740992',
+            'event=delivered&begin=8640000000001&end=8640000000002',
+            'event=delivered&begin=1&end=2&start=1.5',
+            'event=delivered&begin=1&end=2&limit=Infinity',
+        ]
+
+        for (const query of invalidQueries) {
+            expect(() => validateQueryParams(new URL(`https://x.test/?${query}`).searchParams)).toThrow(QueryValidationError)
+        }
+    })
+
     it('uses legacy offset only on the first request, with stable created/id ordering', async () => {
         findMany.mockResolvedValue([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])
         const query = validateQueryParams(new URL(base).searchParams)

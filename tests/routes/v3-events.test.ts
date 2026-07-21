@@ -16,8 +16,26 @@ vi.mock('@/lib/core/logger', () => ({
 }))
 
 import { GET } from '@/app/v3/[siteId]/events/[[...slug]]/route'
+import { QueryValidationError } from '@/service/events-service/events-utils'
+
+const request = (query: string) => ({
+    nextUrl: new URL(`https://x.test/v3/site-1/events?${query}`),
+    url: `https://x.test/v3/site-1/events?${query}`,
+} as never)
+
+const params = { params: Promise.resolve({ siteId: 'site-1' }) }
 
 describe('GET /v3/[siteId]/events error handling', () => {
+    it('returns 400 for invalid analytics query bounds before any event lookup', async () => {
+        validateQueryParams.mockImplementation(() => { throw new QueryValidationError('Invalid query parameter: begin') })
+
+        const response = await GET(request('event=delivered&begin=8640000000001&end=8640000000002'), params)
+
+        expect(response.status).toBe(400)
+        expect(await response.json()).toEqual({ message: 'Invalid query parameter: begin' })
+        expect(fetchAnalyticsEvents).not.toHaveBeenCalled()
+    })
+
     it('does not expose database errors', async () => {
         validateQueryParams.mockReturnValue({})
         fetchAnalyticsEvents.mockRejectedValue(new Error('SQLSTATE secret query'))
