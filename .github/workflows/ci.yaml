@@ -24,12 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx prisma generate
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:run
@@ -41,11 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.6
       - run: bun install --frozen-lockfile
+      - run: bunx prisma generate
       - run: bun run lint
       - run: bun run typecheck
       - run: bun run test:run
@@ -68,20 +70,21 @@ jobs:
           --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
           --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx prisma generate
       - run: npx prisma migrate deploy
       - run: npm run test:analytics-index-migration
         env:
           CI_DB_HOST: 127.0.0.1
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/upload-artifact@v5
+        if: ${{ always() && hashFiles('artifacts/vitest-report.json') != '' }}
         with:
           name: mysql-vitest-report
           path: artifacts/vitest-report.json
@@ -104,20 +107,21 @@ jobs:
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx prisma generate
       - run: npx prisma migrate deploy
       - run: npm run test:analytics-index-migration
         env:
           CI_DB_HOST: 127.0.0.1
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/upload-artifact@v5
+        if: ${{ always() && hashFiles('artifacts/vitest-report.json') != '' }}
         with:
           name: mariadb-vitest-report
           path: artifacts/vitest-report.json

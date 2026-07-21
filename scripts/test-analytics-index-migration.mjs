@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import mariadb from "mariadb"
+import { createConnection } from "mariadb"
 
 const migration = await readFile(
   new URL("../prisma/migrations/20260721120000_add_ghost_analytics_indexes/migration.sql", import.meta.url),
@@ -11,7 +11,7 @@ const host = process.env.CI_DB_HOST
 const password = process.env.CI_DB_ROOT_PASSWORD
 if (!host || !password) throw new Error("CI_DB_HOST and CI_DB_ROOT_PASSWORD are required")
 
-const connection = await mariadb.createConnection({
+const connection = await createConnection({
   host,
   port: Number(process.env.CI_DB_PORT ?? 3306),
   user: process.env.CI_DB_ROOT_USER ?? "root",
