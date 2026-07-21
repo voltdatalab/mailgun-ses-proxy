@@ -4,8 +4,9 @@ dotenv.config()
 import { createServer, IncomingMessage, Server, ServerResponse } from "http"
 import next from "next"
 import logger, { flushLogger } from "./lib/core/logger"
+import { errorClass } from "./lib/core/error-class"
 import { requestShutdown } from "./lib/core/sqs-worker"
-import { createWorkerSupervisor, errorClass } from "./lib/core/worker-supervisor"
+import { createWorkerSupervisor } from "./lib/core/worker-supervisor"
 import { processNewsletterEventsQueue, processNewsletterQueue, processSystemEventsQueue } from "./service/background-process"
 
 const SHUTDOWN_GRACE_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "10000")

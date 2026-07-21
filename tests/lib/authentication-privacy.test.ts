@@ -19,4 +19,15 @@ describe("authentication logging privacy", () => {
         expect(JSON.stringify(log.error.mock.calls)).not.toContain("super-secret-token")
         expect(JSON.stringify(log.error.mock.calls)).not.toContain("stack")
     })
+
+    it("bounds hostile authentication error names", async () => {
+        const { authentication } = await import("@/lib/authentication")
+        const hostile = new Error("token=super-secret-token")
+        hostile.name = "Auth/Error! " + "A".repeat(65)
+        const token = { split: () => { throw hostile } } as unknown as string
+
+        expect(await authentication(token)).toBe(false)
+        expect(log.error).toHaveBeenCalledWith({ errorClass: "Error" }, "Error in authentication")
+        expect(JSON.stringify(log.error.mock.calls)).not.toContain("super-secret-token")
+    })
 })

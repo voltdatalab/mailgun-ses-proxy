@@ -50,11 +50,9 @@ export async function POST(req: NextRequest): Promise<Response> {
             recipients: validation.data.to.length,
         })
     } catch (error) {
-        const message = error instanceof Error ? error.message : "An unexpected error occurred"
         requestLog.error({ errorClass: errorClass(error) }, "Failed to process system email")
         
-        // Generic errors and config errors (like missing 'from') return 500
-        return ApiResponse.internalError(message)
+        return ApiResponse.internalError("Unable to send email. Please retry.")
     }
 }
 

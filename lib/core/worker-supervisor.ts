@@ -1,3 +1,5 @@
+import { errorClass } from "./error-class"
+
 export type WorkerStop = {
     workerName: string
     outcome: 'resolved' | 'rejected'
@@ -61,8 +63,4 @@ export function createWorkerSupervisor(workerNames: readonly string[], callbacks
     }
 
     return { requestGracefulShutdown, watch }
-}
-
-export function errorClass(error: unknown): string {
-    return error instanceof Error ? error.name : typeof error
 }

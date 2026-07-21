@@ -8,6 +8,7 @@ import {
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
+import { errorClass } from "./error-class"
 import { beginWorkerProcessing, endWorkerProcessing, heartbeat, markWorkerDead, recordQueueTelemetry, recordTelemetryError, recordWorkerProcessing, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
@@ -420,10 +421,6 @@ function bootstrapWorker(name: string, queueUrl: string): ReturnType<typeof sqsC
 
 function isAbortError(error: unknown): boolean {
     return error instanceof Error && error.name === "AbortError"
-}
-
-function errorClass(error: unknown): string {
-    return error instanceof Error ? error.name : typeof error
 }
 
 function boundedReceiveCount(value: string | undefined): number | undefined {

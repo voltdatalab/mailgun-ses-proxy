@@ -56,6 +56,25 @@ describe('worker supervisor', () => {
         expect(complete).toHaveBeenCalledWith(1)
     })
 
+    it('bounds hostile worker rejection names', async () => {
+        const fatal = vi.fn()
+        const complete = vi.fn()
+        const worker = deferred()
+        const supervisor = createWorkerSupervisor(['events'], {
+            onUnexpectedStop: fatal,
+            onAllWorkersSettled: complete,
+        })
+        const hostile = new Error('recipient@example.test private detail')
+        hostile.name = 'Worker/Error! ' + 'A'.repeat(65)
+
+        supervisor.watch('events', worker.promise)
+        worker.reject(hostile)
+        await Promise.resolve()
+
+        expect(fatal).toHaveBeenCalledWith({ workerName: 'events', outcome: 'rejected', errorClass: 'Error' })
+        expect(JSON.stringify(fatal.mock.calls)).not.toContain('recipient@example.test')
+    })
+
     it('does not classify normal shutdown stops as fatal and selects exit 0', async () => {
         const fatal = vi.fn()
         const complete = vi.fn()

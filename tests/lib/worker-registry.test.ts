@@ -35,4 +35,17 @@ describe('worker telemetry registry', () => {
         expect(JSON.stringify(first)).not.toContain('recipient@example.test')
         expect(first).not.toBe(second)
     })
+
+    it('bounds hostile telemetry and death error names before storing them', () => {
+        registerWorker('newsletter-events')
+        const hostile = new Error('recipient@example.test private stack')
+        hostile.name = 'Sensitive/Error! ' + 'A'.repeat(65)
+        recordTelemetryError('newsletter-events', hostile)
+        expect(getWorkerStatuses()[0].telemetryErrorClass).toBe('Error')
+
+        markWorkerDead('newsletter-events', { name: 'recipient@example.test' })
+        const worker = getWorkerStatuses()[0]
+        expect(worker.telemetryErrorClass).toBe('UnknownError')
+        expect(JSON.stringify(worker)).not.toContain('recipient@example.test')
+    })
 })

@@ -2,6 +2,7 @@
  * In-process, privacy-safe worker health and SQS telemetry registry.
  * Kept on globalThis so server.ts and Next route bundles share the same state.
  */
+import { errorClass } from "./error-class"
 
 export const EXPECTED_WORKER_NAMES = ["newsletter-sender", "newsletter-events", "system-events"] as const
 export type ExpectedWorkerName = typeof EXPECTED_WORKER_NAMES[number]
@@ -155,4 +156,3 @@ function boundedProcessingDeadline(value: number): number {
 }
 function nullableCount(value: number | null): number | null { return value === null ? null : safeCount(value) }
 function finiteTimestamp(value: number | null): number | null { return value !== null && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null }
-function errorClass(error: unknown): string { return error instanceof Error ? error.name : typeof error }
