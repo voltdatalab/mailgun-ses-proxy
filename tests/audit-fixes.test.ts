@@ -87,7 +87,7 @@ describe('Issue 3: sendMail null content handling', () => {
     vi.resetModules()
   })
 
-  it('validateAndSend should not crash when newsletter content is null', async () => {
+  it('validateAndSend should reject when newsletter content is null so SQS can retry/redrive', async () => {
     const mockSqsSend = vi.fn().mockResolvedValue({})
     vi.doMock('@/service/aws/awsHelper', () => ({
       sqsClient: () => ({ send: mockSqsSend }),
@@ -120,20 +120,19 @@ describe('Issue 3: sendMail null content handling', () => {
       Attributes: { ApproximateReceiveCount: '1' },
     } as any
 
-    // Should not throw — should handle null content gracefully
-    await validateAndSend(message)
+    await expect(validateAndSend(message)).rejects.toThrow('Newsletter batch not found')
   })
 })
 
 // ============================================================
-// Issue 4: Invalid messages should be deleted from SQS (newsletter-service.ts)
+// Issue 4: Invalid messages should remain in SQS for retry/redrive (newsletter-service.ts)
 // ============================================================
-describe('Issue 4: Invalid messages deleted from SQS', () => {
+describe('Issue 4: Invalid messages are retryable', () => {
   beforeEach(() => {
     vi.resetModules()
   })
 
-  it('should resolve cleanly (not throw) for message with missing MessageAttributes', async () => {
+  it('should reject for message with missing MessageAttributes', async () => {
     vi.doMock('@aws-sdk/client-sesv2', () => ({
       SendEmailCommand: vi.fn(),
     }))
@@ -164,12 +163,10 @@ describe('Issue 4: Invalid messages deleted from SQS', () => {
       // Missing MessageAttributes
     } as any
 
-    // Handler must resolve (not throw) so the worker can delete the message.
-    // Deletion is the worker's responsibility, not the handler's.
-    await expect(validateAndSend(message)).resolves.toBeUndefined()
+    await expect(validateAndSend(message)).rejects.toThrow('Invalid newsletter SQS message')
   })
 
-  it('should resolve cleanly (not throw) for message with missing siteId attribute', async () => {
+  it('should reject for message with missing siteId attribute', async () => {
     vi.doMock('@aws-sdk/client-sesv2', () => ({
       SendEmailCommand: vi.fn(),
     }))
@@ -203,8 +200,7 @@ describe('Issue 4: Invalid messages deleted from SQS', () => {
       },
     } as any
 
-    // Handler must resolve (not throw) so the worker can delete the message.
-    await expect(validateAndSend(message)).resolves.toBeUndefined()
+    await expect(validateAndSend(message)).rejects.toThrow('Invalid newsletter SQS message')
   })
 })
 

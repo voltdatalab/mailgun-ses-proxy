@@ -81,6 +81,10 @@ ficam disponíveis para retry e, quando aplicável, redrive pela política da fi
 
 Quando definido como `true`, o serviço persiste conteúdos formatados completos de newsletters para auditoria. Isso pode ampliar a exposição de dados pessoais/conteúdo, o volume do banco e o período de retenção que precisa ser protegido, monitorado e removido conforme a política aplicável. Mantenha `false` salvo quando essa persistência for explicitamente necessária e houver uma política de retenção e controles de privacidade aprovados.
 
+### Privacidade dos logs de newsletter
+
+Os logs operacionais de newsletter não devem conter endereços de destinatários, corpos/payloads de mensagens nem `ReceiptHandle` do SQS. Registre somente identificadores operacionais seguros (por exemplo, `messageId`, `newsletterBatchId`, `siteId`, `errorId`) e contagens; erros devem ser registrados pela sua classe, não pelo objeto bruto. A persistência de payloads para auditoria é um controle separado e só é habilitada pela flag `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` descrita acima.
+
 O comando de inicialização definido no projeto executa `prisma migrate deploy` antes de iniciar o servidor. Portanto, migrações são aplicadas no startup e exigem que `DATABASE_URL` aponte para o banco correto antes do deploy. Não executar migrações manualmente por meio de contêineres ad hoc.
 
 Antes de qualquer deploy que possa aplicar migrações, faça um backup privado do banco, protegido e recuperável, e valide previamente o procedimento de restauração no ambiente apropriado. Planeje migrações como alterações aditivas e retrocompatíveis durante a janela em que versões antiga e nova possam coexistir; mudanças destrutivas devem ser postergadas para uma etapa posterior controlada.

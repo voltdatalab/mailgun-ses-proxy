@@ -51,8 +51,8 @@ export async function validateAndSend(message: Message) {
     const from = message.MessageAttributes?.["from"]?.StringValue
 
     if (!batchId || !siteId || !from) {
-        log.error({ message: safeStringify(message) }, "invalid or incomplete SQS message, discarding")
-        return
+        log.error({ messageId: message.MessageId }, "invalid or incomplete SQS message; leaving for retry/redrive")
+        throw new Error("Invalid newsletter SQS message")
     }
 
     await processBatch(siteId, batchId)
@@ -67,9 +67,8 @@ export async function validateAndSend(message: Message) {
 async function processBatch(siteId: string, newsletterBatchId: string) {
     const contents = await getNewsletterContent(newsletterBatchId)
     if (!contents) {
-        // Permanent — batch is always written before the SQS message is enqueued.
-        log.error({ newsletterBatchId }, "Newsletter batch not found in DB — discarding message")
-        return
+        log.error({ newsletterBatchId, siteId }, "Newsletter batch not found in DB; leaving message for retry/redrive")
+        throw new Error("Newsletter batch not found")
     }
 
     const emails = preparePayload(contents, siteId)
@@ -119,7 +118,7 @@ async function sendSingleEmail(
 
     // Skip if already sent in a previous attempt.
     if (toEmail && await checkNewsletterAlreadySent(newsletterBatchId, toEmail)) {
-        log.info({ toEmail, newsletterBatchId }, "skipping already-sent recipient")
+        log.info({ newsletterBatchId, siteId }, "skipping already-sent recipient")
         return
     }
 
@@ -131,11 +130,11 @@ async function sendSingleEmail(
     } catch (sesError) {
         // SES send failed — record in DB and re-throw for TaskQueue tracking.
         const errorId = randomUUID()
-        log.error({ err: sesError, errorId, toEmail, siteId }, "SES send failed")
+        log.error({ errorClass: errorClass(sesError), errorId, newsletterBatchId, siteId }, "SES send failed")
         try {
             await createNewsletterErrorEntry(errorId, String(sesError), emailBatchId, toEmail, recipientData, formattedContents)
         } catch (dbErr) {
-            log.error({ err: dbErr, errorId, toEmail }, "Failed to persist SES error entry to DB")
+            log.error({ errorClass: errorClass(dbErr), errorId, newsletterBatchId, siteId }, "Failed to persist SES error entry to DB")
         }
         throw sesError
     }
@@ -149,13 +148,17 @@ async function sendSingleEmail(
         await createNewsletterEntry(messageId, newsletterBatchId, toEmail, recipientData, formattedContents)
     } catch (dbError) {
         log.error(
-            { err: dbError, messageId, toEmail, newsletterBatchId, siteId },
+            { errorClass: errorClass(dbError), messageId, newsletterBatchId, siteId },
             "CRITICAL: Email sent via SES but DB record failed — potential duplicate on retry"
         )
         throw dbError
     }
 
-    log.info({ messageId, toEmail, siteId }, "email sent")
+    log.info({ messageId, siteId }, "email sent")
+}
+
+function errorClass(error: unknown): string {
+    return error instanceof Error ? error.constructor.name : typeof error
 }
 
 
