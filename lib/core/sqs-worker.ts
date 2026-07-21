@@ -50,7 +50,7 @@ interface WorkerConfig {
 
 /**
  * Long-polling SQS worker.
- *  - handler resolves → message deleted
+ *  - handler resolves and acknowledgement succeeds → message deleted
  *  - handler throws   → message left in SQS for retry
  *  - poll error       → exponential back-off, loop continues
  *  - failed messages are left for the queue's redrive/DLQ policy
@@ -113,18 +113,19 @@ export async function startWorker(config: WorkerConfig) {
                     continue
                 }
 
-                let anyHandlerSuccess = false
+                let anyMessageAcknowledged = false
 
                 for (const message of messages) {
                     if (await processSqsMessage(client, queueUrl, message, handler, name)) {
-                        anyHandlerSuccess = true
+                        anyMessageAcknowledged = true
                     }
                 }
 
                 // Only consider the poll healthy if at least one handler
-                // succeeded. If every message failed (e.g. DB down), the
+                // succeeded and its acknowledgement succeeded. If every
+                // message failed (e.g. DB down or SQS delete failure), the
                 // worker should not mask the failure behind a heartbeat.
-                if (anyHandlerSuccess) {
+                if (anyMessageAcknowledged) {
                     heartbeat(name)
                     consecutiveErrors = 0
                 } else {
@@ -180,8 +181,7 @@ export async function processSqsMessage(
 ): Promise<boolean> {
     try {
         await handler(message)
-        await deleteMessage(client, queueUrl, message)
-        return true
+        return await deleteMessage(client, queueUrl, message)
     } catch (handlerError) {
         log.error(
             {
@@ -215,16 +215,18 @@ async function deleteMessage(
     client: ReturnType<typeof sqsClient>,
     queueUrl: string,
     message: Message
-): Promise<void> {
-    if (!message.ReceiptHandle) return
+): Promise<boolean> {
+    if (!message.ReceiptHandle) return false
     try {
         await client.send(new DeleteMessageCommand({
             QueueUrl: queueUrl,
             ReceiptHandle: message.ReceiptHandle,
         }))
+        return true
     } catch (err) {
         // Non-fatal — message becomes visible again after the visibility timeout.
         log.warn({ messageId: message.MessageId, err }, "Failed to delete message from SQS")
+        return false
     }
 }
 

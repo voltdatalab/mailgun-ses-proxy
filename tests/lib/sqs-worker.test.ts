@@ -24,6 +24,16 @@ describe('processSqsMessage', () => {
         expect(send.mock.calls[0][0]).toBeInstanceOf(DeleteMessageCommand)
     })
 
+    it('reports failure when acknowledgement fails after the handler resolves', async () => {
+        const send = vi.fn().mockRejectedValue(new Error('SQS DeleteMessage failed'))
+        const handler = vi.fn().mockResolvedValue(undefined)
+
+        await expect(processSqsMessage({ send } as any, queueUrl, message(), handler)).resolves.toBe(false)
+
+        expect(handler).toHaveBeenCalledOnce()
+        expect(send).toHaveBeenCalledTimes(1)
+    })
+
     it('does not delete when the handler throws a transient DB-equivalent failure', async () => {
         const send = vi.fn().mockResolvedValue({})
         const handler = vi.fn().mockRejectedValue(new Error('database temporarily unavailable'))
