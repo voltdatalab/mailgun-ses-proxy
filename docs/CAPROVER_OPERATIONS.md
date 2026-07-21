@@ -76,6 +76,16 @@ plataforma (`SHUTDOWN_GRACE_MS`). Mensagens sem ACK permanecem não confirmadas 
 ficam disponíveis para retry e, quando aplicável, redrive pela política da
 fila.
 
+### Health interno e telemetria SQS cacheada
+
+`GET /healthcheck` é exclusivamente um endpoint operacional **interno**: mantenha-o acessível somente pela rede/proxy interno do CapRover e nunca o publique para a Internet. Ele não consulta SQS por requisição; mostra snapshots cacheados dos três workers esperados (`newsletter-sender`, `newsletter-events`, `system-events`) e apenas campos seguros: liveness/idade de heartbeat, contadores agregados, idade observada de mensagem e profundidades SQS `visible`, `notVisible` e `delayed`.
+
+Cada worker solicita `GetQueueAttributes` no startup/primeiro poll e, no máximo, a cada `SQS_TELEMETRY_SAMPLE_INTERVAL_MS` (padrão **30000**, limitado a 10000–300000 ms). A role AWS precisa de `sqs:GetQueueAttributes` além das permissões de consumo já necessárias. Falhar essa amostra não interrompe receive, handler ou ACK e registra/expõe somente `telemetryErrorClass`, jamais URL da fila, corpo, destinatário, ReceiptHandle, mensagem/stack de erro ou payload.
+
+O endpoint responde **503** quando qualquer worker esperado está ausente, morto ou com heartbeat stale; isso é falha de readiness e permite restart. Backlog alto, telemetria ausente/stale ou idade observada alta retornam **200** com `degraded: true`, para que um restart não agrave uma fila congestionada. Defaults configuráveis e validados: `HEALTH_WORKER_STALE_MS=60000` (30000–300000), `SQS_TELEMETRY_STALE_MS=90000` (30000–600000), `SQS_BACKLOG_DEGRADED_THRESHOLD=1000` (1–1000000) e `SQS_AGE_DEGRADED_MS=900000` (10000–86400000).
+
+Crie alertas internos para `visible`, `notVisible`, `delayed`, `oldestObservedAgeMs`, telemetria stale/falha e métricas da DLQ. Esta telemetria não configura filas, DLQs, políticas IAM além da exigência acima, nem alertas/cloud exporters: política, DLQ e alarmes efetivos permanecem controles operacionais da Task 14.
+
 ### Supervisão e restart dos workers
 
 Os três loops SQS são supervisionados conjuntamente pelo processo HTTP. Se um

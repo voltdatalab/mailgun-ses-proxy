@@ -1,74 +1,128 @@
 /**
- * In-process worker heartbeat registry.
- * Shared between worker loops and the dashboard API route (same Node.js process).
- *
- * Stored on `globalThis` so that the server.ts entry point (which calls
- * registerWorker / heartbeat) and the Next.js API route bundle (which calls
- * getWorkerStatuses) both reference the exact same Map instance.
+ * In-process, privacy-safe worker health and SQS telemetry registry.
+ * Kept on globalThis so server.ts and Next route bundles share the same state.
  */
+
+export const EXPECTED_WORKER_NAMES = ["newsletter-sender", "newsletter-events", "system-events"] as const
+export type ExpectedWorkerName = typeof EXPECTED_WORKER_NAMES[number]
+
+export interface QueueTelemetry {
+    visible: number | null
+    notVisible: number | null
+    delayed: number | null
+    sampledAt: number | null
+}
 
 export interface WorkerStatus {
     name: string
-    lastHeartbeat: number | null  // epoch ms of the last successful poll
+    lastHeartbeat: number | null
     alive: boolean
-    pollCount: number
+    stale: boolean
     startedAt: string | null
-    lastError: string | null
+    received: number
+    acked: number
+    failed: number
+    consecutiveErrors: number
+    lastMessageAt: number | null
+    lastMessageAgeMs: number | null
+    queue: QueueTelemetry
+    telemetryErrorClass: string | null
 }
 
-// Use a Symbol on globalThis so the Map survives Next.js re-bundling.
+type StoredWorker = Omit<WorkerStatus, "stale">
 const REGISTRY_KEY = Symbol.for("mailgun-ses-proxy:worker-registry")
 
-function getRegistry(): Map<string, WorkerStatus> {
+function getRegistry(): Map<string, StoredWorker> {
     const g = globalThis as Record<symbol, unknown>
-    if (!g[REGISTRY_KEY]) {
-        g[REGISTRY_KEY] = new Map<string, WorkerStatus>()
-    }
-    return g[REGISTRY_KEY] as Map<string, WorkerStatus>
+    if (!g[REGISTRY_KEY]) g[REGISTRY_KEY] = new Map<string, StoredWorker>()
+    return g[REGISTRY_KEY] as Map<string, StoredWorker>
 }
 
-/** Registers a worker at loop start. */
+function emptyQueue(): QueueTelemetry {
+    return { visible: null, notVisible: null, delayed: null, sampledAt: null }
+}
+
+/** Registers a loop. A restart deliberately gets fresh counters and timestamps. */
 export function registerWorker(name: string): void {
     getRegistry().set(name, {
-        name,
-        lastHeartbeat: null,
-        alive: false,
-        pollCount: 0,
-        startedAt: new Date().toISOString(),
-        lastError: null,
+        name, lastHeartbeat: null, alive: false, startedAt: new Date().toISOString(),
+        received: 0, acked: 0, failed: 0, consecutiveErrors: 0,
+        lastMessageAt: null, lastMessageAgeMs: null, queue: emptyQueue(), telemetryErrorClass: null,
     })
 }
 
-/** Called on every successful poll iteration (idle or with messages). */
+/** Successful SQS long poll or acknowledged non-empty poll. */
 export function heartbeat(name: string): void {
     const entry = getRegistry().get(name)
     if (!entry) return
     entry.lastHeartbeat = Date.now()
     entry.alive = true
-    entry.pollCount += 1
-    entry.lastError = null
 }
 
-/** Marks a worker as dead and stores the last error. */
+/** Records delivery totals only; payloads, IDs, URLs and error text never enter this registry. */
+export function recordWorkerProcessing(name: string, update: {
+    received?: number
+    acked?: number
+    failed?: number
+    consecutiveErrors?: number
+    lastMessageAgeMs?: number | null
+}): void {
+    const entry = getRegistry().get(name)
+    if (!entry) return
+    entry.received += safeCount(update.received)
+    entry.acked += safeCount(update.acked)
+    entry.failed += safeCount(update.failed)
+    if (update.consecutiveErrors !== undefined) entry.consecutiveErrors = safeCount(update.consecutiveErrors)
+    if (update.lastMessageAgeMs !== undefined) {
+        entry.lastMessageAt = Date.now()
+        entry.lastMessageAgeMs = update.lastMessageAgeMs === null ? null : safeCount(update.lastMessageAgeMs)
+    }
+}
+
+/** Replaces the cached SQS queue-depth sample with parsed non-negative counts. */
+export function recordQueueTelemetry(name: string, queue: QueueTelemetry): void {
+    const entry = getRegistry().get(name)
+    if (!entry) return
+    entry.queue = Object.freeze({
+        visible: nullableCount(queue.visible), notVisible: nullableCount(queue.notVisible),
+        delayed: nullableCount(queue.delayed), sampledAt: finiteTimestamp(queue.sampledAt),
+    })
+    entry.telemetryErrorClass = null
+}
+
+/** Error class is intentionally the sole telemetry failure detail retained. */
+export function recordTelemetryError(name: string, error: unknown): void {
+    const entry = getRegistry().get(name)
+    if (entry) entry.telemetryErrorClass = errorClass(error)
+}
+
+/** Marks a loop unavailable without retaining raw exceptions or error messages. */
 export function markWorkerDead(name: string, error: unknown): void {
     const entry = getRegistry().get(name)
     if (!entry) return
     entry.alive = false
-    entry.lastError = error instanceof Error ? error.message : String(error)
+    entry.telemetryErrorClass = errorClass(error)
 }
 
-/**
- * Returns a liveness snapshot of all workers.
- * A worker is considered stale if its heartbeat is older than `staleThresholdMs`
- * (default 60 s — comfortably above the 20 s SQS long-poll wait).
- */
-export function getWorkerStatuses(staleThresholdMs = 60_000): WorkerStatus[] {
+/** Immutable snapshot copies. `alive` is actual loop state; `stale` is heartbeat age. */
+export function getWorkerStatuses(staleThresholdMs = 60_000): Readonly<WorkerStatus>[] {
     const now = Date.now()
-    return Array.from(getRegistry().values()).map((w) => ({
-        ...w,
-        alive:
-            w.alive &&
-            w.lastHeartbeat !== null &&
-            now - w.lastHeartbeat < staleThresholdMs,
+    const threshold = Math.max(1, safeCount(staleThresholdMs))
+    return Array.from(getRegistry().values()).map(entry => Object.freeze({
+        ...entry,
+        stale: entry.lastHeartbeat === null || now - entry.lastHeartbeat >= threshold,
+        queue: Object.freeze({ ...entry.queue }),
     }))
 }
+
+/** Test-only reset of the global registry. */
+export function resetWorkerRegistryForTests(): void {
+    getRegistry().clear()
+}
+
+function safeCount(value: number | undefined): number {
+    return Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : 0
+}
+function nullableCount(value: number | null): number | null { return value === null ? null : safeCount(value) }
+function finiteTimestamp(value: number | null): number | null { return value !== null && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null }
+function errorClass(error: unknown): string { return error instanceof Error ? error.name : typeof error }

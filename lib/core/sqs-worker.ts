@@ -1,5 +1,6 @@
 import {
     DeleteMessageBatchCommand,
+    GetQueueAttributesCommand,
     type Message,
     type MessageSystemAttributeName,
     type QueueAttributeName,
@@ -7,14 +8,19 @@ import {
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
-import { heartbeat, markWorkerDead, registerWorker } from "./worker-registry"
+import { heartbeat, markWorkerDead, recordQueueTelemetry, recordTelemetryError, recordWorkerProcessing, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
 const POLL_BACKOFF_MIN_MS = 1_000
 const POLL_BACKOFF_MAX_MS = 30_000
 export const MAX_CONSECUTIVE_ERRORS = 50
 const SQS_BATCH_LIMIT = 10
+export const DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS = 30_000
+const MIN_TELEMETRY_SAMPLE_INTERVAL_MS = 10_000
+const MAX_TELEMETRY_SAMPLE_INTERVAL_MS = 5 * 60_000
 let _shutdownRequested = false
+const telemetryRequests = new Set<string>()
+const telemetryLastSample = new Map<string, number>()
 const activePollControllers = new Set<AbortController>()
 
 export function requestShutdown(): void {
@@ -43,7 +49,69 @@ export interface WorkerConfig {
     batchSize?: number
     /** Maximum simultaneous handler calls, bounded to the received batch. */
     maxConcurrency?: number
+    /** Cached GetQueueAttributes sampling interval (10 seconds through 5 minutes). */
+    telemetrySampleIntervalMs?: number
     handler: (message: Message) => Promise<void>
+}
+
+export function normalizeTelemetrySampleInterval(value?: number): number {
+    const numeric = Number.isFinite(value) ? Math.floor(value!) : DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS
+    return Math.min(MAX_TELEMETRY_SAMPLE_INTERVAL_MS, Math.max(MIN_TELEMETRY_SAMPLE_INTERVAL_MS, numeric))
+}
+
+export function buildQueueAttributesInput(queueUrl: string) {
+    return {
+        QueueUrl: queueUrl,
+        AttributeNames: ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed"] as QueueAttributeName[],
+    }
+}
+
+/** One cached sample. Its failures never influence delivery or the circuit breaker. */
+export async function sampleQueueTelemetry(client: ReturnType<typeof sqsClient>, name: string, queueUrl: string): Promise<boolean> {
+    try {
+        const response = await client.send(new GetQueueAttributesCommand(buildQueueAttributesInput(queueUrl)))
+        const attributes = response.Attributes ?? {}
+        recordQueueTelemetry(name, {
+            visible: parseSqsCount(attributes.ApproximateNumberOfMessages),
+            notVisible: parseSqsCount(attributes.ApproximateNumberOfMessagesNotVisible),
+            delayed: parseSqsCount(attributes.ApproximateNumberOfMessagesDelayed),
+            sampledAt: Date.now(),
+        })
+        return true
+    } catch (error) {
+        recordTelemetryError(name, error)
+        log.warn({ name, errorClass: errorClass(error) }, "SQS queue telemetry sample failed")
+        return false
+    }
+}
+
+function parseSqsCount(value: string | undefined): number | null {
+    if (value === undefined || !/^\d+$/.test(value)) return null
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
+/** Starts sampling without coupling a slow/failing attributes call to ACK delivery. */
+function launchQueueTelemetrySample(client: ReturnType<typeof sqsClient>, name: string, queueUrl: string, intervalMs: number): void {
+    const now = Date.now()
+    if (telemetryRequests.has(name) || now - (telemetryLastSample.get(name) ?? 0) < intervalMs) return
+    telemetryLastSample.set(name, now)
+    telemetryRequests.add(name)
+    void sampleQueueTelemetry(client, name, queueUrl).finally(() => telemetryRequests.delete(name))
+}
+
+export function observedMessageAgeMs(messages: Message[]): number | null {
+    let oldest: number | null = null
+    const now = Date.now()
+    for (const message of messages) {
+        const raw = message.Attributes?.SentTimestamp
+        if (!raw || !/^\d+$/.test(raw)) continue
+        const timestamp = Number(raw)
+        if (!Number.isSafeInteger(timestamp) || timestamp < 0) continue
+        const age = Math.max(0, now - timestamp)
+        oldest = oldest === null ? age : Math.max(oldest, age)
+    }
+    return oldest
 }
 
 /**
@@ -132,6 +200,7 @@ export async function startWorker(config: WorkerConfig) {
         waitTimeSeconds = 20,
         batchSize = 1,
         maxConcurrency = 1,
+        telemetrySampleIntervalMs,
         handler,
     } = config
     const client = bootstrapWorker(name, queueUrl)
@@ -141,12 +210,16 @@ export async function startWorker(config: WorkerConfig) {
     registerWorker(name)
     const receiveInput = buildReceiveInput(queueUrl, visibilityTimeout, waitTimeSeconds, batchSize)
     const concurrency = normalizeSqsWorkerCount(maxConcurrency)
+    const telemetryIntervalMs = normalizeTelemetrySampleInterval(
+        telemetrySampleIntervalMs ?? Number(process.env.SQS_TELEMETRY_SAMPLE_INTERVAL_MS),
+    )
     let pollBackoffMs = POLL_BACKOFF_MIN_MS
     let consecutiveErrors = 0
 
     try {
         while (!_shutdownRequested) {
             await new Promise(resolve => setImmediate(resolve))
+            launchQueueTelemetrySample(client, name, queueUrl, telemetryIntervalMs)
             try {
                 let messages: Message[] | undefined
                 try {
@@ -156,6 +229,7 @@ export async function startWorker(config: WorkerConfig) {
                     if (_shutdownRequested && isAbortError(pollError)) break
                     const failure = consecutiveFailure(name, consecutiveErrors)
                     consecutiveErrors = failure.consecutiveErrors
+                    recordWorkerProcessing(name, { consecutiveErrors })
                     log.error({ name, errorClass: errorClass(pollError), consecutiveErrors }, `Poll error — retrying in ${pollBackoffMs}ms`)
                     if (failure.shouldExit) return
                     await sleep(pollBackoffMs)
@@ -167,6 +241,7 @@ export async function startWorker(config: WorkerConfig) {
                 if (_shutdownRequested) break
                 if (!messages || messages.length === 0) {
                     // ReceiveMessage remains a long-poll request, so this does not busy-loop.
+                    recordWorkerProcessing(name, { consecutiveErrors })
                     heartbeat(name)
                     // An idle long-poll proves liveness, but not processing recovery.
                     continue
@@ -176,6 +251,13 @@ export async function startWorker(config: WorkerConfig) {
                 // A non-empty poll is healthy only after a confirmed batch-delete entry.
                 const circuit = circuitBreakerAfterPoll(name, messages, acknowledged, consecutiveErrors)
                 consecutiveErrors = circuit.consecutiveErrors
+                recordWorkerProcessing(name, {
+                    received: messages.length,
+                    acked: acknowledged,
+                    failed: Math.max(0, messages.length - acknowledged),
+                    consecutiveErrors,
+                    lastMessageAgeMs: observedMessageAgeMs(messages),
+                })
                 if (isHealthySqsPoll(messages, acknowledged)) {
                     heartbeat(name)
                 } else {
@@ -185,6 +267,7 @@ export async function startWorker(config: WorkerConfig) {
             } catch (loopError) {
                 const failure = consecutiveFailure(name, consecutiveErrors)
                 consecutiveErrors = failure.consecutiveErrors
+                recordWorkerProcessing(name, { consecutiveErrors })
                 log.error({ name, errorClass: errorClass(loopError), consecutiveErrors }, `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`)
                 if (failure.shouldExit) return
                 await sleep(pollBackoffMs)
