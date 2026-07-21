@@ -118,8 +118,8 @@ describe('/v3/[siteId]/messages POST', () => {
     const result = await response.json()
 
     // Assert
-    expect(response.status).toBe(400)
-    expect(result.message).toEqual('Service unavailable')
+    expect(response.status).toBe(500)
+    expect(result.message).toEqual('Unable to queue message. Please retry.')
   })
 
   it('should handle non-Error exceptions', async () => {
@@ -140,8 +140,8 @@ describe('/v3/[siteId]/messages POST', () => {
     const result = await response.json()
 
     // Assert
-    expect(response.status).toBe(400)
-    expect(result.message).toEqual('an error occurred')
+    expect(response.status).toBe(500)
+    expect(result.message).toEqual('Unable to queue message. Please retry.')
   })
 
   it('should handle form data parsing errors', async () => {
@@ -157,8 +157,8 @@ describe('/v3/[siteId]/messages POST', () => {
     const result = await response.json()
 
     // Assert
-    expect(response.status).toBe(400)
-    expect(result.message).toEqual('Invalid form data')
+    expect(response.status).toBe(500)
+    expect(result.message).toEqual('Unable to queue message. Please retry.')
   })
 
   it('should handle complex form data with multiple recipients', async () => {

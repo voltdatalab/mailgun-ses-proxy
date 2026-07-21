@@ -60,7 +60,7 @@ describe('createEventProcessor', () => {
         const lookupMessage = vi.fn().mockResolvedValue(null)
 
         await expect(processor({ lookupMessage })({ MessageId: 'sqs-1', Body: trackedDeliveryEvent() }))
-            .rejects.toThrow('not found in DB')
+            .rejects.toThrow('not found in database')
     })
 
     it('rejects when notification persistence fails', async () => {

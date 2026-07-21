@@ -83,8 +83,7 @@ describe('newsletter service privacy and retry behavior', () => {
             .rejects.toThrow('Invalid newsletter SQS message')
 
         expect(mocks.log.error).toHaveBeenCalledWith(
-            { messageId: 'safe-message-id' },
-            'invalid or incomplete SQS message; leaving for retry/redrive',
+            'invalid or incomplete SQS message; leaving for retry/redrive'
         )
         const output = loggedMetadata()
         for (const secret of [body, receiptHandle, from, 'private-site-id']) {

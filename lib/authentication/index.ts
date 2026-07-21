@@ -19,7 +19,8 @@ export async function authentication(token: string) {
             return true
         }
     } catch (error) {
-        log.error({ error }, "Error in authentication")
+        const errorClass = error instanceof Error && error.name ? error.name : "UnknownError"
+        log.error({ errorClass }, "Error in authentication")
     }
     return false
 }

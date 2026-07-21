@@ -52,23 +52,19 @@ A full admin dashboard for the Mailgun → SES Proxy with authentication, stats,
 npx prisma migrate dev --name add_dashboard_tables
 ```
 
-### 2. Set JWT secret (optional)
+### 2. Configure dashboard bootstrap secrets
 
-Add to your `.env`:
+Before the dashboard can authenticate, configure these secrets in the deployment environment:
 
 ```
-DASHBOARD_JWT_SECRET=your-secure-secret-here
+DASHBOARD_JWT_SECRET=<random session-signing secret>
+DASHBOARD_INITIAL_ADMIN_EMAIL=operator@example.com
+DASHBOARD_INITIAL_ADMIN_PASSWORD=<at-least-16-character-secret>
 ```
 
-### 3. Default admin user
+The initial email must be nonempty and syntactically valid; the initial password must be at least 16 characters. On an empty database, login creates only this configured account. If a legacy default-account row is found, it is remediated to these configured credentials before any authentication. Missing or weak bootstrap values fail closed and login returns a generic 503 response.
 
-On first login attempt, the system auto-creates:
-
-- **Email:** `admin@localhost`
-- **Password:** `admin`
-
-> [!WARNING]
-> Change the default password immediately after first login.
+Credential rotation is performed through the authenticated settings flow; login never accepts replacement credential fields. Production preflight must confirm that no legacy default account remains.
 
 ## Features
 

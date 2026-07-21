@@ -1,4 +1,4 @@
-import { getSessionFromCookies } from "@/lib/dashboard/auth"
+import { getSessionFromCookies, hashPassword } from "@/lib/dashboard/auth"
 import logger from "@/lib/core/logger"
 import { prisma } from "@/lib/database"
 
@@ -34,7 +34,8 @@ export async function GET() {
 
         return Response.json({ settings })
     } catch (error) {
-        log.error(error, "Settings GET error")
+        const errorClass = error instanceof Error && error.name ? error.name : "UnknownError"
+        log.error({ errorClass }, "Settings GET error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }
@@ -47,30 +48,39 @@ export async function PUT(req: Request) {
         }
 
         const body = await req.json()
-        const { settings } = body as { settings: { key: string; value: string }[] }
+        const { settings, credentials } = body as {
+            settings?: { key: string; value: string }[]
+            credentials?: { email?: string; password?: string }
+        }
 
-        if (!Array.isArray(settings)) {
+        if (settings !== undefined && !Array.isArray(settings)) {
             return Response.json({ error: "Invalid settings format" }, { status: 400 })
+        }
+        if (credentials) {
+            const email = credentials.email?.trim()
+            const password = credentials.password
+            if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length < 16) {
+                return Response.json({ error: "Invalid credential update" }, { status: 400 })
+            }
+            await prisma.dashboardUser.update({
+                where: { id: session.sub },
+                data: { email, password: await hashPassword(password) },
+            })
         }
 
         const validKeys: Set<string> = new Set(MANAGED_SETTINGS.map((s) => s.key))
-
-        const operations = settings
+        const operations = (settings ?? [])
             .filter((s) => validKeys.has(s.key))
-            .map((s) =>
-                prisma.dashboardSettings.upsert({
-                    where: { key: s.key },
-                    update: { value: s.value },
-                    create: { key: s.key, value: s.value },
-                })
-            )
+            .map((s) => prisma.dashboardSettings.upsert({
+                where: { key: s.key }, update: { value: s.value }, create: { key: s.key, value: s.value },
+            }))
 
         await Promise.all(operations)
-        log.info({ count: operations.length, user: session.email }, "Settings updated")
-
-        return Response.json({ ok: true, updated: operations.length })
+        log.info({ count: operations.length, credentialsUpdated: Boolean(credentials) }, "Settings updated")
+        return Response.json({ ok: true, updated: operations.length, credentialsUpdated: Boolean(credentials) })
     } catch (error) {
-        log.error(error, "Settings PUT error")
+        const errorClass = error instanceof Error && error.name ? error.name : "UnknownError"
+        log.error({ errorClass }, "Settings PUT error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }

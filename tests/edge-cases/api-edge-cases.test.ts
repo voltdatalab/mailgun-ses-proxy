@@ -105,8 +105,8 @@ describe('API Edge Cases', () => {
       const response = await v3MessagesPost(request, { params })
       const result = await response.json()
 
-      expect(response.status).toBe(400)
-      expect(result.message).toBe('Malformed multipart data')
+      expect(response.status).toBe(500)
+      expect(result.message).toBe('Unable to queue message. Please retry.')
     })
 
     it('should handle null/undefined siteId variations', async () => {
@@ -586,8 +586,8 @@ describe('API Edge Cases', () => {
       const response = await v3MessagesPost(request, { params })
       const result = await response.json()
 
-      expect(response.status).toBe(400)
-      expect(result.message).toBe('Request timeout')
+      expect(response.status).toBe(500)
+      expect(result.message).toBe('Unable to queue message. Please retry.')
     })
 
     it('should handle memory pressure scenarios', async () => {

@@ -37,7 +37,7 @@ export async function addNewsletterToQueue(message: MailgunMessage, siteId: stri
         },
     }))
 
-    log.info({ batchId: message["v:email-id"], messageId: response.MessageId }, "newsletter queued to SQS")
+    log.info({ batchId: message["v:email-id"] }, "newsletter queued to SQS")
     return { batchId: message["v:email-id"], messageId: response.MessageId }
 }
 
@@ -51,7 +51,7 @@ export async function validateAndSend(message: Message) {
     const from = message.MessageAttributes?.["from"]?.StringValue
 
     if (!batchId || !siteId || !from) {
-        log.error({ messageId: message.MessageId }, "invalid or incomplete SQS message; leaving for retry/redrive")
+        log.error("invalid or incomplete SQS message; leaving for retry/redrive")
         throw new Error("Invalid newsletter SQS message")
     }
 
@@ -154,7 +154,7 @@ async function sendSingleEmail(
         throw dbError
     }
 
-    log.info({ messageId, siteId }, "email sent")
+    log.info({ siteId }, "email sent")
 }
 
 function errorClass(error: unknown): string {

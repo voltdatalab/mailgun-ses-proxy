@@ -23,6 +23,8 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 - `AWS_SECRET_ACCESS_KEY`
 - `DATABASE_URL`
 - `DASHBOARD_JWT_SECRET`
+- `DASHBOARD_INITIAL_ADMIN_EMAIL`
+- `DASHBOARD_INITIAL_ADMIN_PASSWORD`
 
 ### AWS, SES e SQS
 
@@ -45,6 +47,12 @@ Cadastre no CapRover apenas os nomes abaixo, com os valores secretos e específi
 - `RATE_LIMIT`
 - `MAX_CONCURRENT`
 - `SHUTDOWN_GRACE_MS`
+
+### Bootstrap seguro do dashboard
+
+`DASHBOARD_JWT_SECRET` é obrigatório para assinar e verificar sessões. Defina também `DASHBOARD_INITIAL_ADMIN_EMAIL` com um email válido e não vazio e `DASHBOARD_INITIAL_ADMIN_PASSWORD` com pelo menos 16 caracteres. Em banco vazio, o primeiro login cria somente essa conta configurada. Se existir uma linha de credencial legada, ela é substituída por esse email e uma nova hash da senha configurada antes de autenticar. Valores ausentes/fracos bloqueiam login com resposta genérica 503 e não criam conta.
+
+Nunca passe credenciais iniciais em Git, logs ou UI. A rotação posterior ocorre somente por rota de configurações autenticada; o endpoint de login ignora campos de troca de credenciais. No preflight de produção, confirme a presença dos três secrets e que não resta conta legada no banco.
 
 ### Workers SQS: batching e concorrência
 

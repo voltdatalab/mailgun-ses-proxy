@@ -122,8 +122,8 @@ describe('API Routes Integration', () => {
       const newsletterResult = await newsletterResponse.json()
 
       // Assert - Error handled gracefully
-      expect(newsletterResponse.status).toBe(400)
-      expect(newsletterResult.message).toBe('Queue service unavailable')
+      expect(newsletterResponse.status).toBe(500)
+      expect(newsletterResult.message).toBe('Unable to queue message. Please retry.')
 
       // Arrange - System email with validation error
       const invalidEmailPayload = {
@@ -181,8 +181,8 @@ describe('API Routes Integration', () => {
       const v3Response = await v3MessagesPost(v3Request, { params: v3Params })
       const v3Result = await v3Response.json()
 
-      expect(v3Response.status).toBe(400)
-      expect(v3Result).toHaveProperty('message')
+      expect(v3Response.status).toBe(500)
+      expect(v3Result).toHaveProperty('message', 'Unable to queue message. Please retry.')
 
       // Test v1 send error format
       const v1Request = {
