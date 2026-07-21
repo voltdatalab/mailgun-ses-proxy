@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-sqs"
 import { sqsClient } from "../../service/aws/awsHelper"
 import logger from "./logger"
-import { heartbeat, markWorkerDead, recordQueueTelemetry, recordTelemetryError, recordWorkerProcessing, registerWorker } from "./worker-registry"
+import { beginWorkerProcessing, endWorkerProcessing, heartbeat, markWorkerDead, recordQueueTelemetry, recordTelemetryError, recordWorkerProcessing, registerWorker } from "./worker-registry"
 
 const log = logger.child({ module: "sqs-worker" })
 const POLL_BACKOFF_MIN_MS = 1_000
@@ -123,6 +123,12 @@ export function normalizeSqsWorkerCount(value: number | undefined): number {
     return Math.min(SQS_BATCH_LIMIT, Math.max(1, numeric))
 }
 
+/** Bounded in-flight readiness deadline derived from this worker's visibility timeout. */
+export function processingDeadlineMsFromVisibilityTimeout(visibilityTimeout: number | undefined): number {
+    const seconds = Number.isFinite(visibilityTimeout) ? visibilityTimeout! : 30
+    return Math.min(12 * 60 * 60_000, Math.max(1, Math.floor(seconds * 1_000)))
+}
+
 /**
  * An idle long-poll proves the worker is alive; non-empty polls require a
  * confirmed acknowledgement before they count as healthy.
@@ -209,6 +215,7 @@ export async function startWorker(config: WorkerConfig) {
     log.info({ name }, `Starting SQS worker: ${name}`)
     registerWorker(name)
     const receiveInput = buildReceiveInput(queueUrl, visibilityTimeout, waitTimeSeconds, batchSize)
+    const processingDeadlineMs = processingDeadlineMsFromVisibilityTimeout(visibilityTimeout)
     const concurrency = normalizeSqsWorkerCount(maxConcurrency)
     const telemetryIntervalMs = normalizeTelemetrySampleInterval(
         telemetrySampleIntervalMs ?? Number(process.env.SQS_TELEMETRY_SAMPLE_INTERVAL_MS),
@@ -241,13 +248,22 @@ export async function startWorker(config: WorkerConfig) {
                 if (_shutdownRequested) break
                 if (!messages || messages.length === 0) {
                     // ReceiveMessage remains a long-poll request, so this does not busy-loop.
-                    recordWorkerProcessing(name, { consecutiveErrors })
+                    recordWorkerProcessing(name, { consecutiveErrors, lastMessageAgeMs: null })
                     heartbeat(name)
                     // An idle long-poll proves liveness, but not processing recovery.
                     continue
                 }
 
-                const acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
+                // Receiving a batch proves the loop is live. Keep that distinct from ACK success.
+                heartbeat(name)
+                beginWorkerProcessing(name, processingDeadlineMs)
+                let acknowledged: number
+                try {
+                    acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
+                } finally {
+                    // Handler and delete failures must never leave a completed batch marked busy.
+                    endWorkerProcessing(name)
+                }
                 // A non-empty poll is healthy only after a confirmed batch-delete entry.
                 const circuit = circuitBreakerAfterPoll(name, messages, acknowledged, consecutiveErrors)
                 consecutiveErrors = circuit.consecutiveErrors
@@ -332,7 +348,7 @@ async function processWithConcurrency(
                 await handler(message)
                 successful.push(message)
             } catch (handlerError) {
-                log.error({ name, messageId: message.MessageId, receiveCount: message.Attributes?.ApproximateReceiveCount, errorClass: errorClass(handlerError) }, "Handler error — message left in SQS for retry/redrive")
+                log.error({ name, receiveCount: boundedReceiveCount(message.Attributes?.ApproximateReceiveCount), errorClass: errorClass(handlerError) }, "Handler error — message left in SQS for retry/redrive")
             }
         }
     }))
@@ -377,6 +393,12 @@ function isAbortError(error: unknown): boolean {
 
 function errorClass(error: unknown): string {
     return error instanceof Error ? error.name : typeof error
+}
+
+function boundedReceiveCount(value: string | undefined): number | undefined {
+    if (!value || !/^\d+$/.test(value)) return undefined
+    const count = Number(value)
+    return Number.isSafeInteger(count) ? Math.min(1_000, count) : undefined
 }
 
 function sleep(ms: number): Promise<void> {

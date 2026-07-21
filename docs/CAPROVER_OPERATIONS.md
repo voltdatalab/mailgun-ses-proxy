@@ -64,10 +64,11 @@ mensagem pode representar uma campanha inteira. As filas `newsletter-events` e
 `system-events` usam visibility timeout explícito e conservador de **120
 segundos**: como o ACK do lote só ocorre após a conclusão dos handlers, o prazo
 precisa acomodar o handler mais lento do lote concorrente, além do envio do ACK,
-e não o padrão de 30 segundos do worker. Para um lote não vazio, o heartbeat só
-é renovado depois de ao menos um ACK de batch confirmado; falhas de handler ou de
-ACK ficam retryable conforme a política de visibility timeout/redrive/DLQ da
-fila.
+e não o padrão de 30 segundos do worker. Para um lote não vazio, o receive marca
+liveness e processamento antes dos handlers, com prazo limitado pelo
+`visibilityTimeout`; um ACK confirmado continua sendo o único sinal de sucesso
+de entrega. Falhas de handler ou de ACK ficam retryable conforme a política de
+visibility timeout/redrive/DLQ da fila.
 
 No `SIGTERM` ou `SIGINT`, o worker aborta imediatamente um long poll SQS ativo e
 não inicia handlers para mensagens recém-recebidas. Os handlers já em execução
@@ -82,7 +83,7 @@ fila.
 
 Cada worker solicita `GetQueueAttributes` no startup/primeiro poll e, no máximo, a cada `SQS_TELEMETRY_SAMPLE_INTERVAL_MS` (padrão **30000**, limitado a 10000–300000 ms). A role AWS precisa de `sqs:GetQueueAttributes` além das permissões de consumo já necessárias. Falhar essa amostra não interrompe receive, handler ou ACK e registra/expõe somente `telemetryErrorClass`, jamais URL da fila, corpo, destinatário, ReceiptHandle, mensagem/stack de erro ou payload.
 
-O endpoint responde **503** quando qualquer worker esperado está ausente, morto ou com heartbeat stale; isso é falha de readiness e permite restart. Backlog alto, telemetria ausente/stale ou idade observada alta retornam **200** com `degraded: true`, para que um restart não agrave uma fila congestionada. Defaults configuráveis e validados: `HEALTH_WORKER_STALE_MS=60000` (30000–300000), `SQS_TELEMETRY_STALE_MS=90000` (30000–600000), `SQS_BACKLOG_DEGRADED_THRESHOLD=1000` (1–1000000) e `SQS_AGE_DEGRADED_MS=900000` (10000–86400000).
+O endpoint responde **503** quando qualquer worker esperado está ausente, morto, tem heartbeat stale enquanto ocioso ou permanece processando além do prazo derivado do seu `visibilityTimeout`; um worker vivo em processamento antes desse prazo permanece ready, mesmo se o heartbeat anterior tiver mais de 60 segundos. Backlog alto, telemetria ausente/stale ou idade observada alta retornam **200** com `degraded: true`, para que um restart não agrave uma fila congestionada. Defaults configuráveis e validados: `HEALTH_WORKER_STALE_MS=60000` (30000–300000), `SQS_TELEMETRY_STALE_MS=90000` (30000–600000), `SQS_BACKLOG_DEGRADED_THRESHOLD=1000` (1–1000000) e `SQS_AGE_DEGRADED_MS=900000` (10000–86400000).
 
 Crie alertas internos para `visible`, `notVisible`, `delayed`, `oldestObservedAgeMs`, telemetria stale/falha e métricas da DLQ. Esta telemetria não configura filas, DLQs, políticas IAM além da exigência acima, nem alertas/cloud exporters: política, DLQ e alarmes efetivos permanecem controles operacionais da Task 14.
 
@@ -113,7 +114,7 @@ Quando definido como `true`, o serviço persiste conteúdos formatados completos
 
 ### Privacidade dos logs de newsletter
 
-Os logs operacionais de newsletter não devem conter endereços de destinatários, corpos/payloads de mensagens nem `ReceiptHandle` do SQS. Registre somente identificadores operacionais seguros (por exemplo, `messageId`, `newsletterBatchId`, `siteId`, `errorId`) e contagens; erros devem ser registrados pela sua classe, não pelo objeto bruto. A persistência de payloads para auditoria é um controle separado e só é habilitada pela flag `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` descrita acima.
+Os logs operacionais de newsletter não devem conter endereços de destinatários, corpos/payloads de mensagens, `ReceiptHandle` do SQS nem IDs por mensagem (incluindo `messageId`). Registre somente nome do worker, identificadores agregados de baixo risco (por exemplo, `newsletterBatchId`, `siteId`, `errorId`), contagens limitadas e `errorClass`; erros não devem registrar o objeto bruto. A persistência de payloads para auditoria é um controle separado e só é habilitada pela flag `PERSIST_NEWSLETTER_FORMATTED_CONTENTS` descrita acima.
 
 O comando de inicialização definido no projeto executa `prisma migrate deploy` antes de iniciar o servidor. Portanto, migrações são aplicadas no startup e exigem que `DATABASE_URL` aponte para o banco correto antes do deploy. Não executar migrações manualmente por meio de contêineres ad hoc.
 

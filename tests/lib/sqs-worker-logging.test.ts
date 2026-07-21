@@ -14,7 +14,7 @@ vi.mock('@/lib/core/logger', () => ({
 import { processSqsMessages } from '@/lib/core/sqs-worker'
 
 describe('SQS worker handler-error logging', () => {
-    it('does not include message body or receipt handle in error metadata', async () => {
+    it('logs only bounded aggregate handler failure metadata', async () => {
         const message: Message = {
             MessageId: 'message-id',
             Body: 'private message content',
@@ -30,7 +30,7 @@ describe('SQS worker handler-error logging', () => {
         )).resolves.toBe(0)
 
         const metadata = log.error.mock.calls[0][0]
-        expect(metadata).not.toHaveProperty('Body')
-        expect(metadata).not.toHaveProperty('ReceiptHandle')
+        expect(metadata).toMatchObject({ name: 'worker', receiveCount: 2, errorClass: 'Error' })
+        expect(JSON.stringify(metadata)).not.toMatch(/message-id|private message content|private-receipt-handle|sqs\.example\.test|handler failure/i)
     })
 })

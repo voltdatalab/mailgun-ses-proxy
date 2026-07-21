@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { GET } from '@/app/healthcheck/route'
-import { heartbeat, markWorkerDead, recordQueueTelemetry, registerWorker, resetWorkerRegistryForTests } from '@/lib/core/worker-registry'
+import { beginWorkerProcessing, endWorkerProcessing, getWorkerStatuses, heartbeat, markWorkerDead, recordQueueTelemetry, recordWorkerProcessing, registerWorker, resetWorkerRegistryForTests } from '@/lib/core/worker-registry'
 
 const names = ['newsletter-sender', 'newsletter-events', 'system-events']
 function readyWorkers() {
@@ -41,6 +41,58 @@ describe('/healthcheck safe operational health', () => {
         const result = await response()
         expect(result.status).toBe(503)
         expect(result.body.workers.some((worker: { stale: boolean }) => worker.stale)).toBe(true)
+        vi.useRealTimers()
+    })
+    it('keeps a newsletter worker ready while it is processing within its 900 second visibility deadline', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+        readyWorkers()
+        vi.advanceTimersByTime(61_000)
+        heartbeat('newsletter-events')
+        heartbeat('system-events')
+        beginWorkerProcessing('newsletter-sender', 900_000)
+
+        const result = await response()
+
+        expect(result.status).toBe(200)
+        expect(result.body.workers.find((worker: { name: string }) => worker.name === 'newsletter-sender')).toMatchObject({ processing: true, stale: false })
+        vi.useRealTimers()
+    })
+    it('returns 503 when active processing exceeds its deadline', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+        readyWorkers()
+        beginWorkerProcessing('newsletter-sender', 900_000)
+        vi.advanceTimersByTime(900_000)
+
+        const result = await response()
+
+        expect(result.status).toBe(503)
+        expect(result.body.workers.find((worker: { name: string }) => worker.name === 'newsletter-sender')).toMatchObject({ processing: true, stale: true })
+        vi.useRealTimers()
+    })
+    it('clears busy state when processing finishes', () => {
+        registerWorker('newsletter-sender')
+        beginWorkerProcessing('newsletter-sender', 900_000)
+        endWorkerProcessing('newsletter-sender')
+
+        expect(getWorkerStatuses()[0]).toMatchObject({ processing: false, processingStartedAt: null, processingDeadlineAt: null })
+    })
+    it('clears stale observed message age after an empty long poll without erasing its observation timestamp', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+        readyWorkers()
+        recordWorkerProcessing('newsletter-sender', { lastMessageAgeMs: 15 * 60_000 })
+        const before = await response()
+        expect(before.status).toBe(200)
+        expect(before.body).toMatchObject({ status: 'degraded', backlog: { oldestObservedAgeMs: 15 * 60_000 } })
+        const observedAt = before.body.workers.find((worker: { name: string }) => worker.name === 'newsletter-sender').lastMessageAt
+
+        recordWorkerProcessing('newsletter-sender', { lastMessageAgeMs: null })
+        const after = await response()
+        const worker = after.body.workers.find((item: { name: string }) => item.name === 'newsletter-sender')
+        expect(after.body).toMatchObject({ status: 'ok', degraded: false, backlog: { oldestObservedAgeMs: 0 } })
+        expect(worker).toMatchObject({ lastMessageAgeMs: null, lastMessageAt: observedAt })
         vi.useRealTimers()
     })
     it('returns 503 for a dead worker and never serializes secrets/errors', async () => {

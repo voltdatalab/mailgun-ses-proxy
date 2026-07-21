@@ -8,6 +8,7 @@ import {
     consecutiveFailure,
     isHealthySqsPoll,
     normalizeSqsWorkerCount,
+    processingDeadlineMsFromVisibilityTimeout,
     processSqsMessage,
     processSqsMessages,
     receiveSqsMessages,
@@ -41,6 +42,12 @@ describe('SQS receive batching', () => {
     it('uses the configured batch size and preserves its long-poll wait', () => {
         expect(buildReceiveInput(queueUrl, 30, 20, 7).MaxNumberOfMessages).toBe(7)
         expect(buildReceiveInput(queueUrl, 30, 17, 1).WaitTimeSeconds).toBe(17)
+    })
+    it('derives a finite positive processing deadline from configured visibility timeout', () => {
+        expect(processingDeadlineMsFromVisibilityTimeout(900)).toBe(900_000)
+        expect(processingDeadlineMsFromVisibilityTimeout(0)).toBe(1)
+        expect(processingDeadlineMsFromVisibilityTimeout(Number.POSITIVE_INFINITY)).toBe(30_000)
+        expect(processingDeadlineMsFromVisibilityTimeout(99_999)).toBe(12 * 60 * 60_000)
     })
 })
 

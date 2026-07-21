@@ -25,6 +25,9 @@ export interface WorkerStatus {
     consecutiveErrors: number
     lastMessageAt: number | null
     lastMessageAgeMs: number | null
+    processing: boolean
+    processingStartedAt: number | null
+    processingDeadlineAt: number | null
     queue: QueueTelemetry
     telemetryErrorClass: string | null
 }
@@ -47,7 +50,9 @@ export function registerWorker(name: string): void {
     getRegistry().set(name, {
         name, lastHeartbeat: null, alive: false, startedAt: new Date().toISOString(),
         received: 0, acked: 0, failed: 0, consecutiveErrors: 0,
-        lastMessageAt: null, lastMessageAgeMs: null, queue: emptyQueue(), telemetryErrorClass: null,
+        lastMessageAt: null, lastMessageAgeMs: null,
+        processing: false, processingStartedAt: null, processingDeadlineAt: null,
+        queue: emptyQueue(), telemetryErrorClass: null,
     })
 }
 
@@ -57,6 +62,25 @@ export function heartbeat(name: string): void {
     if (!entry) return
     entry.lastHeartbeat = Date.now()
     entry.alive = true
+}
+
+/** Marks a received batch as in-flight using only a bounded visibility deadline. */
+export function beginWorkerProcessing(name: string, deadlineMs: number): void {
+    const entry = getRegistry().get(name)
+    if (!entry) return
+    const now = Date.now()
+    entry.processing = true
+    entry.processingStartedAt = now
+    entry.processingDeadlineAt = now + boundedProcessingDeadline(deadlineMs)
+}
+
+/** Clears in-flight state after every non-empty batch, including failures. */
+export function endWorkerProcessing(name: string): void {
+    const entry = getRegistry().get(name)
+    if (!entry) return
+    entry.processing = false
+    entry.processingStartedAt = null
+    entry.processingDeadlineAt = null
 }
 
 /** Records delivery totals only; payloads, IDs, URLs and error text never enter this registry. */
@@ -74,7 +98,8 @@ export function recordWorkerProcessing(name: string, update: {
     entry.failed += safeCount(update.failed)
     if (update.consecutiveErrors !== undefined) entry.consecutiveErrors = safeCount(update.consecutiveErrors)
     if (update.lastMessageAgeMs !== undefined) {
-        entry.lastMessageAt = Date.now()
+        // Empty polls clear a residual age but retain when the last non-empty sample occurred.
+        if (update.lastMessageAgeMs !== null) entry.lastMessageAt = Date.now()
         entry.lastMessageAgeMs = update.lastMessageAgeMs === null ? null : safeCount(update.lastMessageAgeMs)
     }
 }
@@ -110,7 +135,9 @@ export function getWorkerStatuses(staleThresholdMs = 60_000): Readonly<WorkerSta
     const threshold = Math.max(1, safeCount(staleThresholdMs))
     return Array.from(getRegistry().values()).map(entry => Object.freeze({
         ...entry,
-        stale: entry.lastHeartbeat === null || now - entry.lastHeartbeat >= threshold,
+        stale: entry.processing
+            ? entry.processingDeadlineAt === null || now >= entry.processingDeadlineAt
+            : entry.lastHeartbeat === null || now - entry.lastHeartbeat >= threshold,
         queue: Object.freeze({ ...entry.queue }),
     }))
 }
@@ -122,6 +149,9 @@ export function resetWorkerRegistryForTests(): void {
 
 function safeCount(value: number | undefined): number {
     return Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : 0
+}
+function boundedProcessingDeadline(value: number): number {
+    return Number.isFinite(value) ? Math.min(12 * 60 * 60_000, Math.max(1, Math.floor(value))) : 30_000
 }
 function nullableCount(value: number | null): number | null { return value === null ? null : safeCount(value) }
 function finiteTimestamp(value: number | null): number | null { return value !== null && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null }

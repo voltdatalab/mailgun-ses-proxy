@@ -21,7 +21,7 @@ function healthThresholds() {
 }
 
 function missingWorker(name: string) {
-    return { name, missing: true, alive: false, stale: true, lastHeartbeat: null, startedAt: null, received: 0, acked: 0, failed: 0, consecutiveErrors: 0, lastMessageAt: null, lastMessageAgeMs: null, queue: { visible: null, notVisible: null, delayed: null, sampledAt: null }, telemetryErrorClass: null }
+    return { name, missing: true, alive: false, stale: true, lastHeartbeat: null, startedAt: null, received: 0, acked: 0, failed: 0, consecutiveErrors: 0, lastMessageAt: null, lastMessageAgeMs: null, processing: false, processingStartedAt: null, processingDeadlineAt: null, queue: { visible: null, notVisible: null, delayed: null, sampledAt: null }, telemetryErrorClass: null }
 }
 
 /** Internal operational endpoint. It returns cached, safe registry data only. */
