@@ -5,8 +5,9 @@ on:
         tags:
             - "v[0-9]+.[0-9]+.[0-9]+"
 
-# permissions are needed if pushing to ghcr.io
+# Publish only needs repository read access plus GHCR package write access.
 permissions:
+    contents: read
     packages: write
 
 jobs:
@@ -16,7 +17,7 @@ jobs:
             - name: Set env
               run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Set up QEMU
               uses: docker/setup-qemu-action@v3

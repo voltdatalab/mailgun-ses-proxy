@@ -46,7 +46,7 @@ describe('Performance Edge Cases', () => {
       const duration = endTime - startTime
 
       // All requests should succeed
-      responses.forEach((response, i) => {
+      responses.forEach((response) => {
         expect(response.status).toBe(200)
       })
 

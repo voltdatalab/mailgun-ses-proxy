@@ -38,6 +38,13 @@ export interface AuthPayload {
     }
 }
 
+export interface EventsCursor {
+    v: 1
+    created: string
+    id: string
+    order: "asc" | "desc"
+}
+
 export interface EventsProps {
     siteId: string
     type: string
@@ -46,6 +53,7 @@ export interface EventsProps {
     order: "asc" | "desc"
     start: number
     limit: number
+    cursor?: EventsCursor
     url: string
 }
 
@@ -56,4 +64,5 @@ export interface QueryParams {
     begin: number
     end: number
     order: "asc" | "desc"
+    cursor?: EventsCursor
 }

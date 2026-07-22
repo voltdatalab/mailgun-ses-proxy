@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "crypto"
+import { errorClass } from "@/lib/core/error-class"
 import logger from "@/lib/core/logger"
 
 const log = logger.child({ module: "service/authenticate" })
@@ -19,7 +20,7 @@ export async function authentication(token: string) {
             return true
         }
     } catch (error) {
-        log.error({ error }, "Error in authentication")
+        log.error({ errorClass: errorClass(error) }, "Error in authentication")
     }
     return false
 }

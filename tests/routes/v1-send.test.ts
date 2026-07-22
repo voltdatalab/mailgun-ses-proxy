@@ -3,6 +3,13 @@ import { POST } from '@/app/v1/send/route'
 import { sendSystemMail } from '@/service/transaction-email-service'
 import { NextRequest } from 'next/server'
 
+const { log } = vi.hoisted(() => {
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn() }
+  log.child.mockReturnValue(log)
+  return { log }
+})
+vi.mock('@/lib/core/logger', () => ({ default: log }))
+
 // Mock the service
 vi.mocked(sendSystemMail).mockImplementation(vi.fn())
 
@@ -225,7 +232,7 @@ describe('/v1/send POST', () => {
     expect(result.message).toContain("Validation failed: 'to': Invalid input: expected array, received undefined; 'subject': Invalid input: expected string, received undefined; 'html': Invalid input: expected string, received undefined")
   })
 
-  it('should handle service errors gracefully', async () => {
+  it('returns a generic retryable response and bounded log class for hostile service errors', async () => {
     // Arrange
     const emailPayload = {
       to: ['recipient@example.com'],
@@ -237,7 +244,8 @@ describe('/v1/send POST', () => {
       json: vi.fn().mockResolvedValue(emailPayload),
     } as unknown as NextRequest
 
-    const serviceError = new Error('SES service unavailable')
+    const serviceError = new Error('SES service unavailable: recipient@example.test')
+    serviceError.name = 'SES/Internal Error! ' + 'A'.repeat(65)
     vi.mocked(sendSystemMail).mockRejectedValue(serviceError)
 
     // Act
@@ -251,8 +259,11 @@ describe('/v1/send POST', () => {
     expect(result).toEqual({
       success: false,
       error: 'Internal Server Error',
-      message: 'SES service unavailable',
+      message: 'Unable to send email. Please retry.',
     })
+    expect(JSON.stringify(result)).not.toContain('recipient@example.test')
+    expect(log.error).toHaveBeenCalledWith({ errorClass: 'Error' }, 'Failed to process system email')
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain('recipient@example.test')
   })
 
   it('should handle JSON parsing errors', async () => {
@@ -270,7 +281,7 @@ describe('/v1/send POST', () => {
     expect(result).toEqual({
       success: false,
       error: 'Internal Server Error',
-      message: 'Invalid JSON',
+      message: 'Unable to send email. Please retry.',
       timestamp: result.timestamp
     })
   })
@@ -328,6 +339,6 @@ describe('/v1/send POST', () => {
     expect(response.status).toBe(500)
     expect(result.success).toBe(false) 
     expect(result.error).toBe("Internal Server Error")
-    expect(result.message).toBe("An unexpected error occurred")
+    expect(result.message).toBe("Unable to send email. Please retry.")
   })
 })

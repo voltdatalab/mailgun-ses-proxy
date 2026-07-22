@@ -82,8 +82,8 @@ describe("Comprehensive API Test Suite", () => {
             const response = await v3MessagesPost(request, { params })
             const result = await response.json()
 
-            expect(response.status).toBe(400)
-            expect(result.message).toBe("Service error")
+            expect(response.status).toBe(500)
+            expect(result.message).toBe("Unable to queue message. Please retry.")
         })
     })
 
@@ -287,8 +287,8 @@ describe("Comprehensive API Test Suite", () => {
             const newsletterResponse = await v3MessagesPost(newsletterRequest, { params: newsletterParams })
             const newsletterResult = await newsletterResponse.json()
 
-            expect(newsletterResponse.status).toBe(400)
-            expect(newsletterResult.message).toBe("Queue unavailable")
+            expect(newsletterResponse.status).toBe(500)
+            expect(newsletterResult.message).toBe("Unable to queue message. Please retry.")
 
             // Test system email service error
             const systemEmailRequest = {

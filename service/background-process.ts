@@ -13,6 +13,9 @@ export async function processNewsletterQueue() {
         name: "newsletter-sender",
         queueUrl: QUEUE_URL.NEWSLETTER!,
         visibilityTimeout: 900, // 15 minutes for processing batches
+        // Each SQS message represents an entire newsletter campaign.
+        batchSize: 1,
+        maxConcurrency: 1,
         handler: validateAndSend
     })
 }
@@ -24,6 +27,10 @@ export async function processNewsletterEventsQueue() {
     return startWorker({
         name: "newsletter-events",
         queueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION!,
+        // Batch handlers ACK only after all ten events complete; retain them for 2m.
+        visibilityTimeout: 120,
+        batchSize: 10,
+        maxConcurrency: 10,
         handler: handleNewsletterEmailEvent
     })
 }
@@ -35,6 +42,10 @@ export async function processSystemEventsQueue() {
     return startWorker({
         name: "system-events",
         queueUrl: QUEUE_URL.SYSTEM_NOTIFICATION!,
+        // Batch handlers ACK only after all ten events complete; retain them for 2m.
+        visibilityTimeout: 120,
+        batchSize: 10,
+        maxConcurrency: 10,
         handler: handleSystemEmailEvent
     })
 }

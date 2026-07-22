@@ -1,5 +1,6 @@
 import { getSessionFromCookies } from "@/lib/dashboard/auth"
 import logger from "@/lib/core/logger"
+import { errorClass } from "@/lib/core/error-class"
 import { prisma } from "@/lib/database"
 import { parsePaginationParams } from "@/lib/utils"
 import { NextRequest } from "next/server"
@@ -85,7 +86,7 @@ export async function GET(req: NextRequest) {
             },
         })
     } catch (error) {
-        log.error(error, "Transactional emails API error")
+        log.error({ errorClass: errorClass(error) }, "Transactional emails API error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
     }
 }

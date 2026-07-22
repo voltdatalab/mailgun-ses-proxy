@@ -10,39 +10,23 @@ interface EventProcessorConfig {
     saveNotification: (event: NotificationEvent) => Promise<any>
 }
 
-/**
- * Creates a standardised SES notification handler.
- * Returns (resolves) → worker deletes. Throws → worker retries.
- */
+/** Creates a standardised SES notification handler. Resolves to ACK; throws to retry. */
 export function createEventProcessor(config: EventProcessorConfig) {
     const { name, lookupMessage, saveNotification } = config
-
     return async (message: Message) => {
         if (!message.Body || !message.MessageId) {
-            log.warn({ name }, "Empty SQS message — discarding")
-            return
+            log.warn({ name }, "Invalid SQS event message")
+            throw new Error("Invalid SQS event message")
         }
-
         const result = parseNotificationEvent(message.MessageId, message.Body)
-
         if (!result.isNewsletterEmailEvent && !result.isTransactionalEmailEvent) {
-            log.warn({ name, messageId: result.messageId }, "Untracked event — discarding")
+            log.warn({ name }, "Untracked event — acknowledging")
             return
         }
-
-        const dbMessage = await lookupMessage(result.messageId)
-        if (!dbMessage) {
-            // Possible race condition — throw to trigger a retry.
-            throw new Error(`Message ${result.messageId} not found in DB, will retry`)
+        if (!await lookupMessage(result.messageId)) {
+            throw new Error("Tracked event message not found in database; will retry")
         }
-
-        await saveNotification(result) // upsert — idempotent
-
-        log.info({
-            name,
-            messageId: result.messageId,
-            type: result.type,
-            notificationId: result.notificationId
-        }, "Processed event successfully")
+        await saveNotification(result)
+        log.info({ name, type: result.type }, "Processed event successfully")
     }
 }

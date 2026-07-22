@@ -104,14 +104,19 @@ Fill in your `AWS_ACCESS_KEY_ID`, `DATABASE_URL`, and queue URLs. (See `.env.dev
 Update your Ghost `config.production.json` or Environment Variables:
 
 ```bash
-# Mailgun API URL (Point to your proxy)
-bulkEmail__mailgun__baseUrl="http://your-proxy-ip:3000/v3"
+# CapRover: use the internal service DNS; do not publish the container port.
+bulkEmail__mailgun__baseUrl="http://srv-captain--nucleo-ses-proxy:3000/v3"
+# Generic CapRover form: http://srv-captain--<app>:3000/v3
 bulkEmail__mailgun__apiKey="your-secure-api-key"
 bulkEmail__mailgun__domain="your-verified-ses-domain.com"
 
 # General Email
 mail__from="noreply@your-verified-ses-domain.com"
 ```
+
+For a non-CapRover deployment, point Ghost at the private/reverse-proxied URL
+of the proxy (for example, `http://your-private-proxy:3000/v3`). Do not expose
+the container port solely for Ghost integration.
 
 ---
 
@@ -120,8 +125,11 @@ mail__from="noreply@your-verified-ses-domain.com"
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/v3/{siteId}/messages` | `POST` | The Mailgun-compatible mailer. |
-| `/healthcheck` | `GET` | Returns system status. |
+| `/healthcheck` | `GET` | Unauthenticated CapRover health probe; returns only `status`, `ready`, `degraded`, and `timestamp`. |
+| `/ops/health` | `GET` | Authenticated (Basic API key) detailed worker, queue-backlog, and telemetry health. Do not expose this route publicly. |
 | `/stats/{action}` | `GET` | Retrieve delivery/bounce analytics. |
+
+Queue telemetry uses cached `GetQueueAttributes` samples. Each worker samples immediately at startup and periodically thereafter (including while a long-running handler is in flight), without coupling telemetry failures to message delivery.
 
 ---
 
@@ -129,6 +137,14 @@ mail__from="noreply@your-verified-ses-domain.com"
 * **Rate Limits**: The proxy respects AWS SES sending quotas.
 * **Persistence**: Setting `PERSIST_NEWSLETTER_FORMATTED_CONTENTS=true` allows full HTML auditing but increases DB usage.
 * **Authentication**: Secure your proxy using the `API_KEY` defined in your `.env`.
+
+---
+
+## Repository workflow
+
+Development is integrated into `main`; production is deployed from `caprover`
+through CapRover Method 3. See [Branch governance](docs/BRANCH_GOVERNANCE.md)
+for required checks, promotion, hotfix, and rollback procedures.
 
 ---
 

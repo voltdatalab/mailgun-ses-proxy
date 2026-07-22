@@ -1,4 +1,5 @@
 import logger from "../../lib/core/logger"
+import { errorClass } from "../../lib/core/error-class"
 
 /** Types & Interfaces */
 export type ItemFn<T = any> = () => Promise<T>
@@ -12,6 +13,7 @@ interface StatsEntry {
   item: ItemWrapper | null
   time: number
 }
+
 
 export type QueueStats = {
   min: StatsEntry
@@ -156,7 +158,7 @@ export class TaskQueue {
     try {
       await item.fn()
     } catch (error) {
-      this.log.warn({ err: error, itemId: item.id }, "Queue item failed")
+      this.log.warn({ errorClass: errorClass(error) }, "Queue item failed")
       this.failedCount++
       if (this.failedItems.length < 500) this.failedItems.push(item.id)
     } finally {

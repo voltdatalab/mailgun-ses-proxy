@@ -11,9 +11,9 @@ vi.mock('@aws-sdk/client-sesv2', () => ({
   SendEmailCommand: vi.fn(),
 }))
 
-vi.mock('@aws-sdk/client-sqs', () => ({
+vi.mock('@aws-sdk/client-sqs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@aws-sdk/client-sqs')>(),
   SendMessageCommand: vi.fn(),
-  DeleteMessageCommand: vi.fn(),
 }))
 
 // Mock Prisma

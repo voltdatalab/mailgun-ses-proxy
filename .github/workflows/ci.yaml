@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  push:
+    branches: [main, caprover]
+  pull_request:
+    branches: [main, caprover]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: mysql://ci:ci-password@127.0.0.1:3306/mailgun_ci
+  DASHBOARD_JWT_SECRET: ci-dashboard-session-signing-secret-not-for-production
+  API_KEY: ci-api-key
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:run
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm audit --audit-level=high
+
+  bun-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.6
+      - run: bun install --frozen-lockfile
+      - run: bunx prisma generate
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test:run
+      - run: bun run build
+
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      database:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: mailgun_ci
+          MYSQL_USER: ci
+          MYSQL_PASSWORD: ci-password
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm run test:analytics-index-migration
+        env:
+          CI_DB_HOST: 127.0.0.1
+          CI_DB_ROOT_PASSWORD: ci-root-password
+      - run: npm run test:ci:db
+      - uses: actions/upload-artifact@v5
+        if: ${{ always() && hashFiles('artifacts/vitest-report.json') != '' }}
+        with:
+          name: mysql-vitest-report
+          path: artifacts/vitest-report.json
+          if-no-files-found: error
+
+  mariadb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      database:
+        image: mariadb:11.4
+        env:
+          MARIADB_DATABASE: mailgun_ci
+          MARIADB_USER: ci
+          MARIADB_PASSWORD: ci-password
+          MARIADB_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm run test:analytics-index-migration
+        env:
+          CI_DB_HOST: 127.0.0.1
+          CI_DB_ROOT_PASSWORD: ci-root-password
+      - run: npm run test:ci:db
+      - uses: actions/upload-artifact@v5
+        if: ${{ always() && hashFiles('artifacts/vitest-report.json') != '' }}
+        with:
+          name: mariadb-vitest-report
+          path: artifacts/vitest-report.json
+          if-no-files-found: error

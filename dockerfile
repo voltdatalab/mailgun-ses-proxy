@@ -1,4 +1,4 @@
-FROM oven/bun:1-alpine
+FROM oven/bun:1.3.6-alpine
 
 ENV NODE_ENV=production
 
@@ -14,8 +14,8 @@ RUN chown -R bun:bun /app
 USER bun
 
 # Copy package files and install dependencies
-COPY --chown=bun:bun package.json package-lock.json* bun.lockb* ./
-RUN bun install
+COPY --chown=bun:bun package.json package-lock.json* bun.lock ./
+RUN bun install --frozen-lockfile
 
 # Copy the rest of the application code
 COPY --chown=bun:bun . .
@@ -24,7 +24,7 @@ COPY --chown=bun:bun . .
 RUN DATABASE_URL=mysql://localhost:3306/dummy bun run build
 
 # Expose the application port
-EXPOSE 8080
+EXPOSE 3000
 
 # Run the application using bun
 CMD ["bun", "run", "start:bun"]

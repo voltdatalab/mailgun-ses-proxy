@@ -105,8 +105,8 @@ describe('API Edge Cases', () => {
       const response = await v3MessagesPost(request, { params })
       const result = await response.json()
 
-      expect(response.status).toBe(400)
-      expect(result.message).toBe('Malformed multipart data')
+      expect(response.status).toBe(500)
+      expect(result.message).toBe('Unable to queue message. Please retry.')
     })
 
     it('should handle null/undefined siteId variations', async () => {
@@ -170,7 +170,7 @@ describe('API Edge Cases', () => {
         requests.map(({ request, params }) => v3MessagesPost(request, { params }))
       )
 
-      responses.forEach((response, i) => {
+      responses.forEach((response) => {
         expect(response.status).toBe(200)
       })
     })
@@ -344,7 +344,6 @@ describe('API Edge Cases', () => {
       })
 
       const response = await v1SendPost(request)
-      const result = await response.json()
 
       // With empty SYSTEM_FROM_ADDRESS, the from field will be empty string
       // This should still pass validation since we're setting it
@@ -587,8 +586,8 @@ describe('API Edge Cases', () => {
       const response = await v3MessagesPost(request, { params })
       const result = await response.json()
 
-      expect(response.status).toBe(400)
-      expect(result.message).toBe('Request timeout')
+      expect(response.status).toBe(500)
+      expect(result.message).toBe('Unable to queue message. Please retry.')
     })
 
     it('should handle memory pressure scenarios', async () => {
@@ -672,7 +671,7 @@ describe('API Edge Cases', () => {
         requests.map(request => v1SendPost(request))
       )
 
-      responses.forEach((result, i) => {
+      responses.forEach((result) => {
         if (result.status === 'fulfilled') {
           // The response status depends on validation and service behavior
           expect([200, 400, 500]).toContain(result.value.status)

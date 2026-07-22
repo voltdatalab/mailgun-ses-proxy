@@ -16,7 +16,7 @@ export async function proxy(request: NextRequest) {
     const { pathname } = request.nextUrl
 
     // 1. Whitelist / Healthchecks
-    if (WHITELIST.some(path => pathname.startsWith(path))) {
+    if (WHITELIST.some(path => pathname === path)) {
         return NextResponse.next()
     }
 
@@ -36,8 +36,8 @@ async function handleDashboardAuth(request: NextRequest) {
     const { pathname } = request.nextUrl
 
     // Security: Enforce presence of JWT secret
-    if (!process.env.DASHBOARD_JWT_SECRET) {
-        log.warn("DASHBOARD_JWT_SECRET env var is missing. Dashboard is unavailable.")
+    if ((process.env.DASHBOARD_JWT_SECRET?.length ?? 0) < 32) {
+        log.warn("Dashboard session signing is not configured. Dashboard is unavailable.")
         return new Response("Dashboard Unavailable", { status: 503 })
     }
 
