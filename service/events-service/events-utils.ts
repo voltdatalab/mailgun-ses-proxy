@@ -140,7 +140,7 @@ export function validateQueryParams(searchParams: URLSearchParams): QueryParams 
     // Mailgun-compatible bounds are optional. Current Ghost omits `end` on
     // its normal incremental analytics fetch.
     const begin = parseUnixSeconds(searchParams.get("begin"), "begin", 0)
-    const end = parseUnixSeconds(searchParams.get("end"), "end", Math.floor(Date.now() / 1000))
+    const end = parseUnixSeconds(searchParams.get("end"), "end", Date.now() / 1000)
     if (begin >= end) fail("Invalid query parameter: begin/end")
 
     const ascending = searchParams.get("ascending")
