@@ -29,6 +29,7 @@ export async function processNewsletterEventsQueue() {
         queueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION!,
         // Batch handlers ACK only after all ten events complete; retain them for 2m.
         visibilityTimeout: 120,
+        handlerTimeoutMs: 90_000,
         batchSize: 10,
         maxConcurrency: 10,
         handler: handleNewsletterEmailEvent
@@ -44,6 +45,7 @@ export async function processSystemEventsQueue() {
         queueUrl: QUEUE_URL.SYSTEM_NOTIFICATION!,
         // Batch handlers ACK only after all ten events complete; retain them for 2m.
         visibilityTimeout: 120,
+        handlerTimeoutMs: 90_000,
         batchSize: 10,
         maxConcurrency: 10,
         handler: handleSystemEmailEvent

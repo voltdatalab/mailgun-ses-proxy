@@ -31,6 +31,27 @@ beforeEach(() => {
 })
 
 describe('GET /v3/[siteId]/events error handling', () => {
+    it('accepts the current Ghost query contract without an end bound', async () => {
+        const actual = await vi.importActual<typeof import('@/service/events-service/events-utils')>(
+            '@/service/events-service/events-utils',
+        )
+        validateQueryParams.mockImplementation(actual.validateQueryParams)
+        fetchAnalyticsEvents.mockResolvedValue({ items: [], paging: { next: 'unused' } })
+
+        const response = await GET(request('event=delivered%20OR%20opened&begin=1750000000.125&limit=300&ascending=yes'), params)
+
+        expect(response.status).toBe(200)
+        expect(fetchAnalyticsEvents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                event: 'delivered OR opened',
+                begin: 1750000000.125,
+                order: 'asc',
+            }),
+            'site-1',
+            expect.any(String),
+        )
+    })
+
     it('uses the proxy-forwarded public origin when building pagination links', async () => {
         validateQueryParams.mockReturnValue({})
         fetchAnalyticsEvents.mockResolvedValue({ items: [], paging: { next: 'unused' } })

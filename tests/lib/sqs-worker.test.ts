@@ -13,6 +13,7 @@ import {
     processSqsMessages,
     receiveSqsMessages,
     requestShutdown,
+    HandlerTimeoutError,
 } from '@/lib/core/sqs-worker'
 
 const queueUrl = 'https://sqs.example.test/queue'
@@ -112,6 +113,16 @@ describe('abortable SQS receives', () => {
 })
 
 describe('processSqsMessages', () => {
+    it('fails a hung handler without acknowledging its message', async () => {
+        const send = vi.fn()
+        const handler = vi.fn(() => new Promise<void>(() => {}))
+
+        await expect(processSqsMessages(
+            { send } as any, queueUrl, [message('hung')], handler, 1, 'newsletter-events', 10,
+        )).rejects.toBeInstanceOf(HandlerTimeoutError)
+        expect(send).not.toHaveBeenCalled()
+    })
+
     it('never processes more handlers than maxConcurrency', async () => {
         let active = 0
         let peak = 0

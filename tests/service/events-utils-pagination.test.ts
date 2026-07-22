@@ -42,7 +42,30 @@ describe('analytics keyset pagination', () => {
         ]) expect(() => validateQueryParams(new URL(`https://x.test/?${query}`).searchParams)).toThrow(QueryValidationError)
     })
 
-    it('accepts only safe base-10 integer query values and date-representable bounds', () => {
+    it('accepts Ghost queries with fractional timestamps and omitted Mailgun time bounds', () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-07-22T21:00:00.000Z'))
+        try {
+            expect(validateQueryParams(new URL(
+                'https://x.test/?event=delivered%20OR%20opened&begin=1750000000.125&limit=300&ascending=yes',
+            ).searchParams)).toMatchObject({
+                event: 'delivered OR opened',
+                begin: 1750000000.125,
+                end: 1784754000,
+                order: 'asc',
+            })
+            expect(validateQueryParams(new URL(
+                'https://x.test/?event=delivered&end=1750000000.875',
+            ).searchParams)).toMatchObject({
+                begin: 0,
+                end: 1750000000.875,
+            })
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('accepts only safe base-10 numeric time bounds and integer pagination values', () => {
         const invalidQueries = [
             'event=delivered&begin=1e3&end=2000',
             'event=delivered&begin=0x10&end=20',

@@ -51,6 +51,7 @@ describe('background SQS worker configuration', () => {
             name,
             queueUrl,
             visibilityTimeout: 120,
+            handlerTimeoutMs: 90_000,
             batchSize: 10,
             maxConcurrency: 10,
             handler,
