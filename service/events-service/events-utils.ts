@@ -29,10 +29,14 @@ function parseInteger(value: string | null, key: string, fallback?: number) {
     return parsed
 }
 
-function parseUnixSeconds(value: string | null, key: "begin" | "end") {
-    const seconds = parseInteger(value, key)
+function parseUnixSeconds(value: string | null, key: "begin" | "end", fallback: number) {
+    if (value === null || value === "") return fallback
+    // Ghost uses Unix seconds with optional milliseconds. Keep the grammar
+    // strict so exponent, hex, whitespace and special values remain rejected.
+    if (!/^-?\d+(?:\.\d+)?$/.test(value)) fail(`Invalid query parameter: ${key}`)
+    const seconds = Number(value)
     const date = new Date(seconds * 1000)
-    if (!Number.isFinite(date.getTime())) fail(`Invalid query parameter: ${key}`)
+    if (!Number.isFinite(seconds) || !Number.isFinite(date.getTime())) fail(`Invalid query parameter: ${key}`)
     return seconds
 }
 
@@ -133,8 +137,10 @@ export function validateQueryParams(searchParams: URLSearchParams): QueryParams 
     const start = parseInteger(searchParams.get("start"), "start", 0)
     if (start < 0) fail("Invalid query parameter: start")
 
-    const begin = parseUnixSeconds(searchParams.get("begin"), "begin")
-    const end = parseUnixSeconds(searchParams.get("end"), "end")
+    // Mailgun-compatible bounds are optional. Current Ghost omits `end` on
+    // its normal incremental analytics fetch.
+    const begin = parseUnixSeconds(searchParams.get("begin"), "begin", 0)
+    const end = parseUnixSeconds(searchParams.get("end"), "end", Date.now() / 1000)
     if (begin >= end) fail("Invalid query parameter: begin/end")
 
     const ascending = searchParams.get("ascending")
