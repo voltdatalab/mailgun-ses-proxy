@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [caprover, "rebuild/**"]
+    branches: [main, caprover]
   pull_request:
-    branches: [caprover]
+    branches: [main, caprover]
   workflow_dispatch:
 
 permissions:
