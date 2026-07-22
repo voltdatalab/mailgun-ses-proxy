@@ -140,6 +140,14 @@ Queue telemetry uses cached `GetQueueAttributes` samples. Each worker samples im
 
 ---
 
+## Repository workflow
+
+Development is integrated into `main`; production is deployed from `caprover`
+through CapRover Method 3. See [Branch governance](docs/BRANCH_GOVERNANCE.md)
+for required checks, promotion, hotfix, and rollback procedures.
+
+---
+
 ## Contributing & License
 Currently in production at [typetale.app](https://typetale.app).
 
