@@ -14,6 +14,7 @@ import { beginWorkerProcessing, endWorkerProcessing, heartbeat, markWorkerDead, 
 const log = logger.child({ module: "sqs-worker" })
 const POLL_BACKOFF_MIN_MS = 1_000
 const POLL_BACKOFF_MAX_MS = 30_000
+const RECEIVE_DEADLINE_GRACE_MS = 10_000
 export const MAX_CONSECUTIVE_ERRORS = 50
 const SQS_BATCH_LIMIT = 10
 export const DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS = 30_000
@@ -162,6 +163,20 @@ export class HandlerTimeoutError extends Error {
     }
 }
 
+export class ReceiveTimeoutError extends Error {
+    constructor() {
+        super("SQS receive deadline exceeded")
+        this.name = "ReceiveTimeoutError"
+    }
+}
+
+/** Gives the AWS long poll a bounded transport grace period before aborting it. */
+export function receiveDeadlineMsFromWaitTimeSeconds(waitTimeSeconds: number | undefined): number {
+    const seconds = Number.isFinite(waitTimeSeconds) ? Math.floor(waitTimeSeconds!) : 20
+    const boundedSeconds = Math.min(20, Math.max(0, seconds))
+    return boundedSeconds * 1_000 + RECEIVE_DEADLINE_GRACE_MS
+}
+
 async function withHandlerTimeout<T>(operation: Promise<T>, timeoutMs: number | undefined, workerName: string): Promise<T> {
     if (!Number.isFinite(timeoutMs) || timeoutMs! <= 0) return operation
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -238,13 +253,26 @@ export function buildReceiveInput(queueUrl: string, visibilityTimeout: number, w
 export async function receiveSqsMessages(
     client: ReturnType<typeof sqsClient>,
     receiveInput: ReturnType<typeof buildReceiveInput>,
+    receiveDeadlineMs = receiveDeadlineMsFromWaitTimeSeconds(receiveInput.WaitTimeSeconds),
 ): Promise<Message[] | undefined> {
     const controller = new AbortController()
+    let timeout: ReturnType<typeof setTimeout> | undefined
     activePollControllers.add(controller)
     try {
-        const response = await client.send(new ReceiveMessageCommand(receiveInput), { abortSignal: controller.signal })
+        const receive = client.send(new ReceiveMessageCommand(receiveInput), { abortSignal: controller.signal })
+        const deadline = new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => {
+                // Settle the deadline first so an abort-aware client cannot replace
+                // the operational timeout with a generic AbortError.
+                reject(new ReceiveTimeoutError())
+                controller.abort()
+            }, Math.max(1, Math.floor(receiveDeadlineMs)))
+            timeout.unref?.()
+        })
+        const response = await Promise.race([receive, deadline])
         return response.Messages
     } finally {
+        if (timeout) clearTimeout(timeout)
         activePollControllers.delete(controller)
     }
 }

@@ -12,8 +12,10 @@ import {
     processSqsMessage,
     processSqsMessages,
     receiveSqsMessages,
+    receiveDeadlineMsFromWaitTimeSeconds,
     requestShutdown,
     HandlerTimeoutError,
+    ReceiveTimeoutError,
 } from '@/lib/core/sqs-worker'
 
 const queueUrl = 'https://sqs.example.test/queue'
@@ -49,6 +51,13 @@ describe('SQS receive batching', () => {
         expect(processingDeadlineMsFromVisibilityTimeout(0)).toBe(1)
         expect(processingDeadlineMsFromVisibilityTimeout(Number.POSITIVE_INFINITY)).toBe(30_000)
         expect(processingDeadlineMsFromVisibilityTimeout(99_999)).toBe(12 * 60 * 60_000)
+    })
+
+    it('bounds each receive beyond the configured SQS long-poll window', () => {
+        expect(receiveDeadlineMsFromWaitTimeSeconds(20)).toBe(30_000)
+        expect(receiveDeadlineMsFromWaitTimeSeconds(0)).toBe(10_000)
+        expect(receiveDeadlineMsFromWaitTimeSeconds(Number.NaN)).toBe(30_000)
+        expect(receiveDeadlineMsFromWaitTimeSeconds(99)).toBe(30_000)
     })
 })
 
@@ -93,6 +102,27 @@ describe('SQS worker circuit breaker', () => {
 })
 
 describe('abortable SQS receives', () => {
+    it('aborts and rejects a receive which remains hung past its deadline', async () => {
+        vi.useFakeTimers()
+        let signal: AbortSignal | undefined
+        const send = vi.fn((command: unknown, options: { abortSignal?: AbortSignal }) => {
+            void command
+            signal = options.abortSignal
+            return new Promise(() => {})
+        })
+        const receiving = receiveSqsMessages(
+            { send } as any,
+            buildReceiveInput(queueUrl, 30, 20, 1),
+            25,
+        )
+
+        const timedOut = expect(receiving).rejects.toBeInstanceOf(ReceiveTimeoutError)
+        await vi.advanceTimersByTimeAsync(25)
+        await timedOut
+        expect(signal?.aborted).toBe(true)
+        vi.useRealTimers()
+    })
+
     it('aborts an active long poll when shutdown is requested', async () => {
         const send = vi.fn((_command, options: { abortSignal?: AbortSignal }) => new Promise((_, reject) => {
             options.abortSignal?.addEventListener('abort', () => {
