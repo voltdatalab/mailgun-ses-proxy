@@ -53,6 +53,8 @@ export interface WorkerConfig {
     batchSize?: number
     /** Maximum simultaneous handler calls, bounded to the received batch. */
     maxConcurrency?: number
+    /** Fatal deadline for one handler; timeout stops the worker for process replacement. */
+    handlerTimeoutMs?: number
     /** Cached GetQueueAttributes sampling interval (10 seconds through 5 minutes). */
     telemetrySampleIntervalMs?: number
     handler: (message: Message) => Promise<void>
@@ -153,6 +155,29 @@ export function normalizeSqsWorkerCount(value: number | undefined): number {
     return Math.min(SQS_BATCH_LIMIT, Math.max(1, numeric))
 }
 
+export class HandlerTimeoutError extends Error {
+    constructor(workerName: string) {
+        super(`Handler deadline exceeded for ${workerName}`)
+        this.name = "HandlerTimeoutError"
+    }
+}
+
+async function withHandlerTimeout<T>(operation: Promise<T>, timeoutMs: number | undefined, workerName: string): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs! <= 0) return operation
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            operation,
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new HandlerTimeoutError(workerName)), Math.floor(timeoutMs!))
+                timer.unref?.()
+            }),
+        ])
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
+}
+
 /** Bounded in-flight readiness deadline derived from this worker's visibility timeout. */
 export function processingDeadlineMsFromVisibilityTimeout(visibilityTimeout: number | undefined): number {
     const seconds = Number.isFinite(visibilityTimeout) ? visibilityTimeout! : 30
@@ -236,6 +261,7 @@ export async function startWorker(config: WorkerConfig) {
         waitTimeSeconds = 20,
         batchSize = 1,
         maxConcurrency = 1,
+        handlerTimeoutMs,
         telemetrySampleIntervalMs,
         handler,
     } = config
@@ -289,7 +315,7 @@ export async function startWorker(config: WorkerConfig) {
                 beginWorkerProcessing(name, processingDeadlineMs)
                 let acknowledged: number
                 try {
-                    acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name)
+                    acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name, handlerTimeoutMs)
                 } finally {
                     // Handler and delete failures must never leave a completed batch marked busy.
                     endWorkerProcessing(name)
@@ -311,6 +337,11 @@ export async function startWorker(config: WorkerConfig) {
                     if (circuit.shouldExit) return
                 }
             } catch (loopError) {
+                if (loopError instanceof HandlerTimeoutError) {
+                    log.error({ name, errorClass: errorClass(loopError) }, "Handler deadline exceeded — stopping worker for replacement")
+                    markWorkerDead(name, loopError)
+                    return
+                }
                 const failure = consecutiveFailure(name, consecutiveErrors)
                 consecutiveErrors = failure.consecutiveErrors
                 recordWorkerProcessing(name, { consecutiveErrors })
@@ -342,8 +373,9 @@ export async function processSqsMessages(
     handler: (message: Message) => Promise<void>,
     maxConcurrency = 1,
     name = "worker",
+    handlerTimeoutMs?: number,
 ): Promise<number> {
-    const successful = await processWithConcurrency(messages, handler, maxConcurrency, name)
+    const successful = await processWithConcurrency(messages, handler, maxConcurrency, name, handlerTimeoutMs)
     const ackable = successful.filter(message => Boolean(message.ReceiptHandle))
     let acknowledged = 0
     for (let offset = 0; offset < ackable.length; offset += SQS_BATCH_LIMIT) {
@@ -368,6 +400,7 @@ async function processWithConcurrency(
     handler: (message: Message) => Promise<void>,
     maxConcurrency: number,
     name: string,
+    handlerTimeoutMs?: number,
 ): Promise<Message[]> {
     const successful: Message[] = []
     let next = 0
@@ -377,9 +410,10 @@ async function processWithConcurrency(
         while (!_shutdownRequested && next < messages.length) {
             const message = messages[next++]
             try {
-                await handler(message)
+                await withHandlerTimeout(handler(message), handlerTimeoutMs, name)
                 successful.push(message)
             } catch (handlerError) {
+                if (handlerError instanceof HandlerTimeoutError) throw handlerError
                 log.error({ name, receiveCount: boundedReceiveCount(message.Attributes?.ApproximateReceiveCount), errorClass: errorClass(handlerError) }, "Handler error — message left in SQS for retry/redrive")
             }
         }
