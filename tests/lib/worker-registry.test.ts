@@ -1,6 +1,8 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import {
     EXPECTED_WORKER_NAMES,
+    beginWorkerProcessing,
+    endWorkerProcessing,
     getWorkerStatuses,
     markWorkerDead,
     recordQueueTelemetry,
@@ -47,5 +49,22 @@ describe('worker telemetry registry', () => {
         const worker = getWorkerStatuses()[0]
         expect(worker.telemetryErrorClass).toBe('UnknownError')
         expect(JSON.stringify(worker)).not.toContain('recipient@example.test')
+    })
+
+    it('stays processing until every concurrent poller has finished', () => {
+        registerWorker('newsletter-events')
+        beginWorkerProcessing('newsletter-events', 30_000)
+        beginWorkerProcessing('newsletter-events', 30_000)
+
+        endWorkerProcessing('newsletter-events')
+        expect(getWorkerStatuses()[0]).toMatchObject({ processing: true, processingCount: 1 })
+
+        endWorkerProcessing('newsletter-events')
+        expect(getWorkerStatuses()[0]).toMatchObject({
+            processing: false,
+            processingCount: 0,
+            processingStartedAt: null,
+            processingDeadlineAt: null,
+        })
     })
 })

@@ -54,6 +54,8 @@ export interface WorkerConfig {
     batchSize?: number
     /** Maximum simultaneous handler calls, bounded to the received batch. */
     maxConcurrency?: number
+    /** Independent ReceiveMessage loops sharing this worker's handler and health. */
+    pollConcurrency?: number
     /** Fatal deadline for one handler; timeout stops the worker for process replacement. */
     handlerTimeoutMs?: number
     /** Cached GetQueueAttributes sampling interval (10 seconds through 5 minutes). */
@@ -254,8 +256,12 @@ export async function receiveSqsMessages(
     client: ReturnType<typeof sqsClient>,
     receiveInput: ReturnType<typeof buildReceiveInput>,
     receiveDeadlineMs = receiveDeadlineMsFromWaitTimeSeconds(receiveInput.WaitTimeSeconds),
+    pollerSignal?: AbortSignal,
 ): Promise<Message[] | undefined> {
     const controller = new AbortController()
+    const abortFromPoller = () => controller.abort(pollerSignal?.reason)
+    if (pollerSignal?.aborted) abortFromPoller()
+    else pollerSignal?.addEventListener("abort", abortFromPoller, { once: true })
     let timeout: ReturnType<typeof setTimeout> | undefined
     activePollControllers.add(controller)
     try {
@@ -273,6 +279,7 @@ export async function receiveSqsMessages(
         return response.Messages
     } finally {
         if (timeout) clearTimeout(timeout)
+        pollerSignal?.removeEventListener("abort", abortFromPoller)
         activePollControllers.delete(controller)
     }
 }
@@ -289,6 +296,7 @@ export async function startWorker(config: WorkerConfig) {
         waitTimeSeconds = 20,
         batchSize = 1,
         maxConcurrency = 1,
+        pollConcurrency = 1,
         handlerTimeoutMs,
         telemetrySampleIntervalMs,
         handler,
@@ -296,7 +304,9 @@ export async function startWorker(config: WorkerConfig) {
     const client = bootstrapWorker(name, queueUrl)
     if (!client) return
 
-    log.info({ name }, `Starting SQS worker: ${name}`)
+    const workerClient = client
+    const pollerCount = normalizeSqsWorkerCount(pollConcurrency)
+    log.info({ name, pollerCount }, `Starting SQS worker: ${name}`)
     registerWorker(name)
     const receiveInput = buildReceiveInput(queueUrl, visibilityTimeout, waitTimeSeconds, batchSize)
     const processingDeadlineMs = processingDeadlineMsFromVisibilityTimeout(visibilityTimeout)
@@ -304,24 +314,26 @@ export async function startWorker(config: WorkerConfig) {
     const telemetryIntervalMs = normalizeTelemetrySampleInterval(
         telemetrySampleIntervalMs ?? Number(process.env.SQS_TELEMETRY_SAMPLE_INTERVAL_MS),
     )
-    startQueueTelemetrySampling(client, name, queueUrl, telemetryIntervalMs)
-    let pollBackoffMs = POLL_BACKOFF_MIN_MS
-    let consecutiveErrors = 0
+    startQueueTelemetrySampling(workerClient, name, queueUrl, telemetryIntervalMs)
+    const pollerGroup = new AbortController()
 
-    try {
-        while (!_shutdownRequested) {
+    async function runPoller(poller: number): Promise<void> {
+        let pollBackoffMs = POLL_BACKOFF_MIN_MS
+        let consecutiveErrors = 0
+
+        while (!_shutdownRequested && !pollerGroup.signal.aborted) {
             await new Promise(resolve => setImmediate(resolve))
             try {
                 let messages: Message[] | undefined
                 try {
-                    messages = await receiveSqsMessages(client, receiveInput)
+                    messages = await receiveSqsMessages(workerClient, receiveInput, undefined, pollerGroup.signal)
                     pollBackoffMs = POLL_BACKOFF_MIN_MS
                 } catch (pollError) {
-                    if (_shutdownRequested && isAbortError(pollError)) break
+                    if (isAbortError(pollError) && (_shutdownRequested || pollerGroup.signal.aborted)) break
                     const failure = consecutiveFailure(name, consecutiveErrors)
                     consecutiveErrors = failure.consecutiveErrors
                     recordWorkerProcessing(name, { consecutiveErrors })
-                    log.error({ name, errorClass: errorClass(pollError), consecutiveErrors }, `Poll error — retrying in ${pollBackoffMs}ms`)
+                    log.error({ name, poller, errorClass: errorClass(pollError), consecutiveErrors }, `Poll error — retrying in ${pollBackoffMs}ms`)
                     if (failure.shouldExit) return
                     await sleep(pollBackoffMs)
                     pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
@@ -343,9 +355,9 @@ export async function startWorker(config: WorkerConfig) {
                 beginWorkerProcessing(name, processingDeadlineMs)
                 let acknowledged: number
                 try {
-                    acknowledged = await processSqsMessages(client, queueUrl, messages, handler, concurrency, name, handlerTimeoutMs)
+                    acknowledged = await processSqsMessages(workerClient, queueUrl, messages, handler, concurrency, name, handlerTimeoutMs)
                 } finally {
-                    // Handler and delete failures must never leave a completed batch marked busy.
+                    // Concurrent pollers share one health entry; only the final batch clears busy state.
                     endWorkerProcessing(name)
                 }
                 // A non-empty poll is healthy only after a confirmed batch-delete entry.
@@ -361,28 +373,45 @@ export async function startWorker(config: WorkerConfig) {
                 if (isHealthySqsPoll(messages, acknowledged)) {
                     heartbeat(name)
                 } else {
-                    log.warn({ name, consecutiveErrors }, "No messages in batch acknowledged — incrementing error counter")
+                    log.warn({ name, poller, consecutiveErrors }, "No messages in batch acknowledged — incrementing error counter")
                     if (circuit.shouldExit) return
                 }
             } catch (loopError) {
                 if (loopError instanceof HandlerTimeoutError) {
-                    log.error({ name, errorClass: errorClass(loopError) }, "Handler deadline exceeded — stopping worker for replacement")
-                    markWorkerDead(name, loopError)
-                    return
+                    log.error({ name, poller, errorClass: errorClass(loopError) }, "Handler deadline exceeded — stopping worker for replacement")
+                    throw loopError
                 }
                 const failure = consecutiveFailure(name, consecutiveErrors)
                 consecutiveErrors = failure.consecutiveErrors
                 recordWorkerProcessing(name, { consecutiveErrors })
-                log.error({ name, errorClass: errorClass(loopError), consecutiveErrors }, `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`)
+                log.error({ name, poller, errorClass: errorClass(loopError), consecutiveErrors }, `Unexpected loop error — continuing (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`)
                 if (failure.shouldExit) return
                 await sleep(pollBackoffMs)
                 pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_BACKOFF_MAX_MS)
             }
         }
-        log.info({ name }, `Worker ${name} stopped (shutdown requested)`)
+    }
+
+    try {
+        const pollers = Array.from({ length: pollerCount }, async (_, index) => {
+            await runPoller(index + 1)
+            if (!_shutdownRequested) {
+                throw new Error(`SQS poller ${index + 1}/${pollerCount} stopped unexpectedly for ${name}`)
+            }
+        })
+        try {
+            await Promise.all(pollers)
+        } catch (pollerError) {
+            // Stop sibling long polls, then let any sibling handler/ACK settle before
+            // handing the worker failure to the process supervisor.
+            pollerGroup.abort(pollerError)
+            await Promise.allSettled(pollers)
+            throw pollerError
+        }
+        log.info({ name, pollerCount }, `Worker ${name} stopped (shutdown requested)`)
         markWorkerDead(name, "graceful shutdown")
     } catch (fatalError) {
-        log.error({ name, errorClass: errorClass(fatalError) }, "Fatal error escaped worker loop")
+        log.error({ name, pollerCount, errorClass: errorClass(fatalError) }, "Fatal error escaped worker loop")
         markWorkerDead(name, fatalError)
         throw fatalError
     } finally {

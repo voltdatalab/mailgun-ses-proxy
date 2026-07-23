@@ -23,7 +23,7 @@ function healthThresholds() {
 }
 
 function missingWorker(name: string) {
-    return { name, missing: true, alive: false, stale: true, lastHeartbeat: null, startedAt: null, received: 0, acked: 0, failed: 0, consecutiveErrors: 0, lastMessageAt: null, lastMessageAgeMs: null, processing: false, processingStartedAt: null, processingDeadlineAt: null, queue: { visible: null, notVisible: null, delayed: null, sampledAt: null }, telemetryErrorClass: null }
+    return { name, missing: true, alive: false, stale: true, lastHeartbeat: null, startedAt: null, received: 0, acked: 0, failed: 0, consecutiveErrors: 0, lastMessageAt: null, lastMessageAgeMs: null, processing: false, processingCount: 0, processingStartedAt: null, processingDeadlineAt: null, queue: { visible: null, notVisible: null, delayed: null, sampledAt: null }, telemetryErrorClass: null }
 }
 
 function sum(workers: HealthWorker[], key: "visible" | "notVisible" | "delayed"): number {
