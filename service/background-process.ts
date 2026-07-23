@@ -1,4 +1,4 @@
-import { startWorker } from "../lib/core/sqs-worker"
+import { normalizeSqsWorkerCount, startWorker } from "../lib/core/sqs-worker"
 import { QUEUE_URL } from "./aws/awsHelper"
 import { handleNewsletterEmailEvent } from "./events-service"
 import { validateAndSend } from "./newsletter-service"
@@ -16,6 +16,7 @@ export async function processNewsletterQueue() {
         // Each SQS message represents an entire newsletter campaign.
         batchSize: 1,
         maxConcurrency: 1,
+        pollConcurrency: 1,
         handler: validateAndSend
     })
 }
@@ -24,6 +25,10 @@ export async function processNewsletterQueue() {
  * Processes delivery/bounce events for newsletter emails.
  */
 export async function processNewsletterEventsQueue() {
+    const configuredPollers = process.env.NEWSLETTER_EVENT_POLLER_COUNT
+    const pollConcurrency = configuredPollers === undefined || configuredPollers.trim() === ""
+        ? 3
+        : normalizeSqsWorkerCount(Number(configuredPollers))
     return startWorker({
         name: "newsletter-events",
         queueUrl: QUEUE_URL.NEWSLETTER_NOTIFICATION!,
@@ -32,6 +37,7 @@ export async function processNewsletterEventsQueue() {
         handlerTimeoutMs: 90_000,
         batchSize: 10,
         maxConcurrency: 10,
+        pollConcurrency,
         handler: handleNewsletterEmailEvent
     })
 }
@@ -48,6 +54,7 @@ export async function processSystemEventsQueue() {
         handlerTimeoutMs: 90_000,
         batchSize: 10,
         maxConcurrency: 10,
+        pollConcurrency: 1,
         handler: handleSystemEmailEvent
     })
 }
