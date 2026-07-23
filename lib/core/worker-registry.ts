@@ -27,6 +27,7 @@ export interface WorkerStatus {
     lastMessageAt: number | null
     lastMessageAgeMs: number | null
     processing: boolean
+    processingCount: number
     processingStartedAt: number | null
     processingDeadlineAt: number | null
     queue: QueueTelemetry
@@ -52,7 +53,7 @@ export function registerWorker(name: string): void {
         name, lastHeartbeat: null, alive: false, startedAt: new Date().toISOString(),
         received: 0, acked: 0, failed: 0, consecutiveErrors: 0,
         lastMessageAt: null, lastMessageAgeMs: null,
-        processing: false, processingStartedAt: null, processingDeadlineAt: null,
+        processing: false, processingCount: 0, processingStartedAt: null, processingDeadlineAt: null,
         queue: emptyQueue(), telemetryErrorClass: null,
     })
 }
@@ -70,15 +71,18 @@ export function beginWorkerProcessing(name: string, deadlineMs: number): void {
     const entry = getRegistry().get(name)
     if (!entry) return
     const now = Date.now()
+    entry.processingCount += 1
     entry.processing = true
-    entry.processingStartedAt = now
-    entry.processingDeadlineAt = now + boundedProcessingDeadline(deadlineMs)
+    entry.processingStartedAt = entry.processingStartedAt ?? now
+    entry.processingDeadlineAt = Math.max(entry.processingDeadlineAt ?? 0, now + boundedProcessingDeadline(deadlineMs))
 }
 
 /** Clears in-flight state after every non-empty batch, including failures. */
 export function endWorkerProcessing(name: string): void {
     const entry = getRegistry().get(name)
     if (!entry) return
+    entry.processingCount = Math.max(0, entry.processingCount - 1)
+    if (entry.processingCount > 0) return
     entry.processing = false
     entry.processingStartedAt = null
     entry.processingDeadlineAt = null

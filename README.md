@@ -100,6 +100,8 @@ npm start
 ### 1. Proxy Setup (`.env`)
 Fill in your `AWS_ACCESS_KEY_ID`, `DATABASE_URL`, and queue URLs. (See `.env.dev` for full details).
 
+`NEWSLETTER_EVENT_POLLER_COUNT` controls only the delivery/open/bounce event queue. It defaults to `3` and is clamped to `1..10`. Newsletter sending and system-event consumers remain on one poll loop, so increasing analytics throughput does not multiply newsletter campaign sends.
+
 ### 2. Ghost CMS Integration
 Update your Ghost `config.production.json` or Environment Variables:
 
