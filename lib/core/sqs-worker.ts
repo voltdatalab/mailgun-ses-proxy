@@ -256,8 +256,12 @@ export async function receiveSqsMessages(
     client: ReturnType<typeof sqsClient>,
     receiveInput: ReturnType<typeof buildReceiveInput>,
     receiveDeadlineMs = receiveDeadlineMsFromWaitTimeSeconds(receiveInput.WaitTimeSeconds),
+    pollerSignal?: AbortSignal,
 ): Promise<Message[] | undefined> {
     const controller = new AbortController()
+    const abortFromPoller = () => controller.abort(pollerSignal?.reason)
+    if (pollerSignal?.aborted) abortFromPoller()
+    else pollerSignal?.addEventListener("abort", abortFromPoller, { once: true })
     let timeout: ReturnType<typeof setTimeout> | undefined
     activePollControllers.add(controller)
     try {
@@ -275,6 +279,7 @@ export async function receiveSqsMessages(
         return response.Messages
     } finally {
         if (timeout) clearTimeout(timeout)
+        pollerSignal?.removeEventListener("abort", abortFromPoller)
         activePollControllers.delete(controller)
     }
 }
@@ -310,20 +315,21 @@ export async function startWorker(config: WorkerConfig) {
         telemetrySampleIntervalMs ?? Number(process.env.SQS_TELEMETRY_SAMPLE_INTERVAL_MS),
     )
     startQueueTelemetrySampling(workerClient, name, queueUrl, telemetryIntervalMs)
+    const pollerGroup = new AbortController()
 
     async function runPoller(poller: number): Promise<void> {
         let pollBackoffMs = POLL_BACKOFF_MIN_MS
         let consecutiveErrors = 0
 
-        while (!_shutdownRequested) {
+        while (!_shutdownRequested && !pollerGroup.signal.aborted) {
             await new Promise(resolve => setImmediate(resolve))
             try {
                 let messages: Message[] | undefined
                 try {
-                    messages = await receiveSqsMessages(workerClient, receiveInput)
+                    messages = await receiveSqsMessages(workerClient, receiveInput, undefined, pollerGroup.signal)
                     pollBackoffMs = POLL_BACKOFF_MIN_MS
                 } catch (pollError) {
-                    if (_shutdownRequested && isAbortError(pollError)) break
+                    if (isAbortError(pollError) && (_shutdownRequested || pollerGroup.signal.aborted)) break
                     const failure = consecutiveFailure(name, consecutiveErrors)
                     consecutiveErrors = failure.consecutiveErrors
                     recordWorkerProcessing(name, { consecutiveErrors })
@@ -387,12 +393,21 @@ export async function startWorker(config: WorkerConfig) {
     }
 
     try {
-        await Promise.all(Array.from({ length: pollerCount }, async (_, index) => {
+        const pollers = Array.from({ length: pollerCount }, async (_, index) => {
             await runPoller(index + 1)
             if (!_shutdownRequested) {
                 throw new Error(`SQS poller ${index + 1}/${pollerCount} stopped unexpectedly for ${name}`)
             }
-        }))
+        })
+        try {
+            await Promise.all(pollers)
+        } catch (pollerError) {
+            // Stop sibling long polls, then let any sibling handler/ACK settle before
+            // handing the worker failure to the process supervisor.
+            pollerGroup.abort(pollerError)
+            await Promise.allSettled(pollers)
+            throw pollerError
+        }
         log.info({ name, pollerCount }, `Worker ${name} stopped (shutdown requested)`)
         markWorkerDead(name, "graceful shutdown")
     } catch (fatalError) {
