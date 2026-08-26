@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createEventProcessor } from '@/lib/core/event-processor'
+vi.mock('@/lib/core/logger', () => ({
+    default: {
+        child: () => ({
+            info: vi.fn(),
+            warn: vi.fn(),
+        }),
+    },
+}))
+import { createEventProcessor, TrackedEventMessageMissingError } from '@/lib/core/event-processor'
 
 function trackedDeliveryEvent() {
     return JSON.stringify({
@@ -58,9 +66,18 @@ describe('createEventProcessor', () => {
 
     it('rejects when the corresponding DB message is missing', async () => {
         const lookupMessage = vi.fn().mockResolvedValue(null)
+        const rejected = processor({ lookupMessage })({ MessageId: 'sqs-1', Body: trackedDeliveryEvent() })
 
-        await expect(processor({ lookupMessage })({ MessageId: 'sqs-1', Body: trackedDeliveryEvent() }))
-            .rejects.toThrow('not found in database')
+        await expect(rejected).rejects.toBeInstanceOf(TrackedEventMessageMissingError)
+        await expect(rejected).rejects.toThrow('Tracked event message missing')
+
+        try {
+            await rejected
+        } catch (error) {
+            expect(error).toBeInstanceOf(TrackedEventMessageMissingError)
+            expect(error).toHaveProperty('message')
+            expect((error as Error).message).not.toContain('ses-message-1')
+        }
     })
 
     it('rejects when notification persistence fails', async () => {

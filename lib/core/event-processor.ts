@@ -4,6 +4,14 @@ import logger from "./logger"
 
 const log = logger.child({ module: "event-processor" })
 
+export class TrackedEventMessageMissingError extends Error {
+    constructor() {
+        super("Tracked event message missing; will retry")
+        this.name = "TrackedEventMessageMissingError"
+        Object.setPrototypeOf(this, new.target.prototype)
+    }
+}
+
 interface EventProcessorConfig {
     name: string
     lookupMessage: (messageId: string) => Promise<any>
@@ -24,7 +32,7 @@ export function createEventProcessor(config: EventProcessorConfig) {
             return
         }
         if (!await lookupMessage(result.messageId)) {
-            throw new Error("Tracked event message not found in database; will retry")
+            throw new TrackedEventMessageMissingError()
         }
         await saveNotification(result)
         log.info({ name, type: result.type }, "Processed event successfully")
