@@ -16,11 +16,23 @@ interface EventProcessorConfig {
     name: string
     lookupMessage: (messageId: string) => Promise<any>
     saveNotification: (event: NotificationEvent) => Promise<any>
+    persistMissingParentNotification?: (event: NotificationEvent) => Promise<any>
+    isMissingParentSaveError?: (error: unknown) => boolean
 }
 
 /** Creates a standardised SES notification handler. Resolves to ACK; throws to retry. */
 export function createEventProcessor(config: EventProcessorConfig) {
-    const { name, lookupMessage, saveNotification } = config
+    const { name, lookupMessage, saveNotification, persistMissingParentNotification, isMissingParentSaveError } = config
+
+    async function persistMissingParent(result: NotificationEvent) {
+        if (!persistMissingParentNotification) {
+            throw new TrackedEventMessageMissingError()
+        }
+
+        await persistMissingParentNotification(result)
+        log.warn({ name, reason: "missing_parent", type: result.type }, "Tracked event parent missing; orphan persisted")
+    }
+
     return async (message: Message) => {
         if (!message.Body || !message.MessageId) {
             log.warn({ name }, "Invalid SQS event message")
@@ -32,9 +44,20 @@ export function createEventProcessor(config: EventProcessorConfig) {
             return
         }
         if (!await lookupMessage(result.messageId)) {
-            throw new TrackedEventMessageMissingError()
+            await persistMissingParent(result)
+            return
         }
-        await saveNotification(result)
+
+        try {
+            await saveNotification(result)
+        } catch (error) {
+            if (persistMissingParentNotification && isMissingParentSaveError?.(error)) {
+                await persistMissingParent(result)
+                return
+            }
+            throw error
+        }
+
         log.info({ name, type: result.type }, "Processed event successfully")
     }
 }

@@ -79,6 +79,13 @@ function prepareNotificationData(event: NotificationEvent) {
     }
 }
 
+function prepareNotificationOrphanData(event: NotificationEvent) {
+    return {
+        ...prepareNotificationData(event),
+        reason: "missing_parent",
+    }
+}
+
 export function saveNewsletterNotification(event: NotificationEvent) {
     const data = prepareNotificationData(event)
     return prisma.newsletterNotifications.upsert({
@@ -86,6 +93,26 @@ export function saveNewsletterNotification(event: NotificationEvent) {
         create: data,
         update: data,
     })
+}
+
+export function saveNewsletterNotificationOrphan(event: NotificationEvent) {
+    const data = prepareNotificationOrphanData(event)
+    return prisma.newsletterNotificationOrphan.upsert({
+        where: { notificationId: event.notificationId },
+        create: data,
+        update: data,
+    })
+}
+
+export function isNewsletterNotificationForeignKeyError(error: unknown) {
+    if (!error || typeof error !== "object") return false
+
+    const candidate = error as { code?: unknown, meta?: unknown }
+    if (candidate.code !== "P2003") return false
+    if (!candidate.meta || typeof candidate.meta !== "object") return false
+
+    const fieldName = (candidate.meta as { field_name?: unknown }).field_name
+    return typeof fieldName === "string" && fieldName.length > 0
 }
 
 export async function checkNewsletterAlreadySent(batchId: string, toEmail: string) {
