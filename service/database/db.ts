@@ -1,4 +1,5 @@
 import { NotificationEvent } from "../../lib/core/aws-utils"
+import type { Prisma } from "../../lib/generated"
 import { safeStringify } from "../../lib/core/common"
 import { prisma } from "../../lib/database"
 import { MailgunMessage } from "../../types/mailgun"
@@ -101,6 +102,48 @@ export function saveNewsletterNotificationOrphan(event: NotificationEvent) {
         where: { notificationId: event.notificationId },
         create: data,
         update: data,
+    })
+}
+
+export type NewsletterOrphanReconciliationResult = "absent" | "parent_missing" | "reconciled"
+
+/**
+ * Explicit, exact-ID reconciliation for a newsletter event that was durably
+ * retained because its parent mapping was missing. This is deliberately not
+ * invoked from an SQS worker: operators choose when a restored mapping is
+ * eligible to be reconciled.
+ */
+export async function reconcileNewsletterNotificationOrphan(
+    notificationId: string,
+): Promise<NewsletterOrphanReconciliationResult> {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const orphan = await tx.newsletterNotificationOrphan.findUnique({
+            where: { notificationId },
+        })
+        if (!orphan) return "absent"
+
+        const message = await tx.newsletterMessages.findUnique({
+            where: { messageId: orphan.messageId },
+            select: { id: true },
+        })
+        if (!message) return "parent_missing"
+
+        const data = {
+            messageId: orphan.messageId,
+            notificationId: orphan.notificationId,
+            rawEvent: orphan.rawEvent,
+            timestamp: orphan.timestamp,
+            type: orphan.type,
+        }
+        await tx.newsletterNotifications.upsert({
+            where: { notificationId: orphan.notificationId },
+            create: data,
+            update: data,
+        })
+        await tx.newsletterNotificationOrphan.delete({
+            where: { id: orphan.id },
+        })
+        return "reconciled"
     })
 }
 
