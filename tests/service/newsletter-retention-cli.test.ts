@@ -113,7 +113,7 @@ function makeDatabase() {
 function makeDependencies(files: Record<string, unknown> = { [EVIDENCE_PATH]: evidence }) {
     const { database, transaction, tx } = makeDatabase()
     const release = vi.fn(async () => undefined)
-    const tryAcquire = vi.fn(async () => ({ release }))
+    const tryAcquire = vi.fn(async (): Promise<{ release: typeof release } | null> => ({ release }))
     const lock: NewsletterRetentionApplyLockProvider = { tryAcquire }
     const createLockProvider = vi.fn(() => lock)
     const readJsonFile = vi.fn(async (path: string) => {
@@ -188,10 +188,36 @@ describe('newsletter retention CLI engine', () => {
         expect(output.mode).toBe('dry-run')
         expect(output.dryRun).toBe(true)
         expect(harness.transaction).not.toHaveBeenCalled()
-        expect(harness.createLockProvider).not.toHaveBeenCalled()
+        expect(harness.createLockProvider).toHaveBeenCalledOnce()
+        expect(harness.tryAcquire).toHaveBeenCalledWith('newsletter-retention-apply')
+        expect(harness.release).toHaveBeenCalledOnce()
         expect(harness.writeJsonFileExclusive).not.toHaveBeenCalled()
         expect(JSON.stringify(output)).not.toContain(privateRecord.batchRecordId)
         expect(JSON.stringify(output)).not.toContain('private-message-id')
+    })
+
+    it('refuses an overlapping dry-run before candidate loading or output writes', async () => {
+        const harness = makeDependencies()
+        harness.tryAcquire.mockResolvedValueOnce(null)
+
+        await expect(executeNewsletterRetentionCli(baseArgs(), harness.dependencies)).rejects.toThrow(
+            'newsletter retention command is already running',
+        )
+
+        expect(harness.database.newsletterBatch.findMany).not.toHaveBeenCalled()
+        expect(harness.writeJsonFileExclusive).not.toHaveBeenCalled()
+        expect(harness.release).not.toHaveBeenCalled()
+    })
+
+    it('releases the dry-run lock when candidate loading fails', async () => {
+        const harness = makeDependencies()
+        vi.mocked(harness.database.newsletterBatch.findMany).mockRejectedValueOnce(new Error('SECRET_DATABASE_ERROR'))
+
+        await expect(executeNewsletterRetentionCli(baseArgs(), harness.dependencies)).rejects.toThrow(
+            'newsletter retention dry-run failed',
+        )
+
+        expect(harness.release).toHaveBeenCalledOnce()
     })
 
     it('writes public and private dry-run artifacts with separate modes and keeps private IDs out of output', async () => {
@@ -272,7 +298,7 @@ describe('newsletter retention CLI engine', () => {
             ...baseArgs(),
             '--manifest-out', MANIFEST_OUT_PATH,
             '--private-artifact-out', ARTIFACT_OUT_PATH,
-        ], harness.dependencies)).rejects.toThrow('second write failed')
+        ], harness.dependencies)).rejects.toThrow('newsletter retention dry-run failed')
 
         expect(harness.removeOutputFile).toHaveBeenCalledOnce()
         expect(harness.removeOutputFile).toHaveBeenCalledWith(MANIFEST_OUT_PATH)

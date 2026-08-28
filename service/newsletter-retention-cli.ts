@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
-import { lstat, open, realpath, unlink } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { lstat, open, unlink } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 
 import {
     buildNewsletterRetentionManifest,
@@ -20,6 +20,7 @@ import {
     type NewsletterRetentionApplyArtifact,
 } from './newsletter-retention-apply.js'
 import {
+    NEWSLETTER_RETENTION_APPLY_LOCK_KEY,
     executeNewsletterRetentionApply,
     type NewsletterRetentionApplyDatabase,
     type NewsletterRetentionApplyLockProvider,
@@ -109,7 +110,7 @@ export async function executeNewsletterRetentionCli(
     })
 
     if (!options.apply) {
-        return executeDryRun(options, policy, evidence, dependencies)
+        return executeDryRunWithLock(options, policy, evidence, dependencies)
     }
 
     return executeApply(options, policy, evidence, dependencies)
@@ -121,10 +122,11 @@ export async function readNewsletterRetentionJsonFile(
 ): Promise<unknown> {
     const normalizedPath = normalizeAbsolutePath(path, 'input file')
     let handle: Awaited<ReturnType<typeof open>> | null = null
+    let parent: BoundParentDirectory | null = null
 
     try {
-        await validateSecureParentPath(normalizedPath)
-        handle = await open(normalizedPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+        parent = await openBoundParentDirectory(normalizedPath)
+        handle = await open(parent.boundFilePath, constants.O_RDONLY | constants.O_NOFOLLOW)
         const stat = await handle.stat()
         if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_JSON_FILE_BYTES) {
             throw new Error('invalid file')
@@ -148,6 +150,7 @@ export async function readNewsletterRetentionJsonFile(
         throw new NewsletterRetentionCliError(`newsletter retention ${privacy} input file is invalid`)
     } finally {
         await handle?.close().catch(() => undefined)
+        await parent?.handle.close().catch(() => undefined)
     }
 }
 
@@ -158,30 +161,34 @@ export async function writeNewsletterRetentionJsonFileExclusive(
 ): Promise<void> {
     const normalizedPath = normalizeAbsolutePath(path, 'output file')
     let handle: Awaited<ReturnType<typeof open>> | null = null
+    let parent: BoundParentDirectory | null = null
     let created = false
 
     try {
-        await validateSecureParentPath(normalizedPath)
         const serialized = `${JSON.stringify(value)}\n`
         if (Buffer.byteLength(serialized, 'utf8') > MAX_JSON_FILE_BYTES) {
             throw new Error('output too large')
         }
 
+        parent = await openBoundParentDirectory(normalizedPath)
         handle = await open(
-            normalizedPath,
+            parent.boundFilePath,
             constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
             mode,
         )
         created = true
         await handle.writeFile(serialized, { encoding: 'utf8' })
-        await handle.sync()
         await handle.chmod(mode)
+        await handle.sync()
+        await parent.handle.sync()
     } catch {
         if (created) {
             await handle?.close().catch(() => undefined)
             handle = null
             try {
-                await unlink(normalizedPath)
+                if (!parent) throw new Error('missing bound parent')
+                await unlink(parent.boundFilePath)
+                await parent.handle.sync()
             } catch {
                 throw new NewsletterRetentionCliError('newsletter retention output rollback failed')
             }
@@ -189,17 +196,65 @@ export async function writeNewsletterRetentionJsonFileExclusive(
         throw new NewsletterRetentionCliError('newsletter retention output file could not be created')
     } finally {
         await handle?.close().catch(() => undefined)
+        await parent?.handle.close().catch(() => undefined)
     }
 }
 
 export async function removeNewsletterRetentionOutputFile(path: string): Promise<void> {
     const normalizedPath = normalizeAbsolutePath(path, 'output file')
+    let parent: BoundParentDirectory | null = null
     try {
-        await validateSecureParentPath(normalizedPath)
-        await unlink(normalizedPath)
+        parent = await openBoundParentDirectory(normalizedPath)
+        const stat = await lstat(parent.boundFilePath)
+        const getuid = process.getuid
+        const currentUid = typeof getuid === 'function' ? getuid.call(process) : null
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (currentUid !== null && stat.uid !== currentUid)) {
+            throw new Error('output rollback target is unsafe')
+        }
+        await unlink(parent.boundFilePath)
+        await parent.handle.sync()
     } catch {
         throw new NewsletterRetentionCliError('newsletter retention output rollback failed')
+    } finally {
+        await parent?.handle.close().catch(() => undefined)
     }
+}
+
+async function executeDryRunWithLock(
+    options: ParsedCliOptions,
+    policy: ReturnType<typeof parseNewsletterRetentionPolicy>,
+    evidence: NewsletterRetentionEvidence,
+    dependencies: NewsletterRetentionCliDependencies,
+): Promise<NewsletterRetentionCliDryRunOutput> {
+    let lease: Awaited<ReturnType<NewsletterRetentionApplyLockProvider['tryAcquire']>>
+    try {
+        lease = await dependencies.createLockProvider().tryAcquire(NEWSLETTER_RETENTION_APPLY_LOCK_KEY)
+    } catch {
+        throw new NewsletterRetentionCliError('newsletter retention lock acquisition failed')
+    }
+    if (!lease) {
+        throw new NewsletterRetentionCliError('newsletter retention command is already running')
+    }
+
+    let output: NewsletterRetentionCliDryRunOutput | null = null
+    let operationError: unknown
+    try {
+        output = await executeDryRun(options, policy, evidence, dependencies)
+    } catch (error) {
+        operationError = error
+    }
+
+    try {
+        await lease.release()
+    } catch {
+        throw new NewsletterRetentionCliError('newsletter retention lock release failed')
+    }
+    if (operationError) {
+        if (operationError instanceof NewsletterRetentionCliError) throw operationError
+        throw new NewsletterRetentionCliError('newsletter retention dry-run failed')
+    }
+    if (!output) throw new NewsletterRetentionCliError()
+    return output
 }
 
 async function executeDryRun(
@@ -533,32 +588,58 @@ function ensureDistinctPaths(paths: Array<string | undefined>): void {
     }
 }
 
-async function validateSecureParentPath(path: string): Promise<void> {
-    let current = dirname(path)
-    if (await realpath(current) !== current) {
-        throw new Error('parent path must not contain symbolic links')
+interface BoundParentDirectory {
+    handle: Awaited<ReturnType<typeof open>>
+    boundFilePath: string
+}
+
+async function openBoundParentDirectory(path: string): Promise<BoundParentDirectory> {
+    const fileName = basename(path)
+    if (!fileName || fileName === '.' || fileName === '..' || fileName.includes(sep)) {
+        throw new Error('file name is invalid')
     }
 
+    const components = dirname(path).split(sep).filter((component) => component.length > 0)
+    const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+    let current = await open(sep, directoryFlags)
+    try {
+        await validateSecureDirectoryHandle(current)
+        for (const component of components) {
+            const next = await open(`/proc/self/fd/${current.fd}/${component}`, directoryFlags)
+            try {
+                await validateSecureDirectoryHandle(next)
+            } catch (error) {
+                await next.close().catch(() => undefined)
+                throw error
+            }
+            await current.close()
+            current = next
+        }
+
+        return {
+            handle: current,
+            boundFilePath: `/proc/self/fd/${current.fd}/${fileName}`,
+        }
+    } catch (error) {
+        await current.close().catch(() => undefined)
+        throw error
+    }
+}
+
+async function validateSecureDirectoryHandle(handle: Awaited<ReturnType<typeof open>>): Promise<void> {
+    const stat = await handle.stat()
+    if (!stat.isDirectory()) {
+        throw new Error('parent path must contain only directories')
+    }
     const getuid = process.getuid
     const currentUid = typeof getuid === 'function' ? getuid.call(process) : null
-    while (true) {
-        const stat = await lstat(current)
-        if (!stat.isDirectory() || stat.isSymbolicLink()) {
-            throw new Error('parent path must contain only directories')
-        }
-
-        const groupOrOtherWritable = (stat.mode & 0o022) !== 0
-        const rootOwnedStickyDirectory = stat.uid === 0 && (stat.mode & 0o1000) !== 0
-        if (groupOrOtherWritable && !rootOwnedStickyDirectory) {
-            throw new Error('parent path permissions are unsafe')
-        }
-        if (currentUid !== null && stat.uid !== 0 && stat.uid !== currentUid) {
-            throw new Error('parent path owner is unsafe')
-        }
-
-        const parent = dirname(current)
-        if (parent === current) return
-        current = parent
+    const groupOrOtherWritable = (stat.mode & 0o022) !== 0
+    const rootOwnedStickyDirectory = stat.uid === 0 && (stat.mode & 0o1000) !== 0
+    if (groupOrOtherWritable && !rootOwnedStickyDirectory) {
+        throw new Error('parent path permissions are unsafe')
+    }
+    if (currentUid !== null && stat.uid !== 0 && stat.uid !== currentUid) {
+        throw new Error('parent path owner is unsafe')
     }
 }
 
