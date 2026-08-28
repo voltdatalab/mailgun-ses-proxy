@@ -60,6 +60,20 @@ model NewsletterNotifications {
   @@index([type, created, id], map: "idx_notifications_type_created_id")
 }
 
+model NewsletterNotificationOrphan {
+  id             String   @id @default(uuid())
+  notificationId String   @unique
+  messageId      String
+  type           String
+  timestamp      DateTime
+  rawEvent       String   @db.Text
+  reason         String
+  created        DateTime @default(now())
+  reconciledAt   DateTime?
+
+  @@index([messageId, reconciledAt, created], map: "idx_newsletter_notification_orphans_message_reconciled_created")
+}
+
 model SystemMailNotifications {
   id             String      @id @default(uuid())
   type           String
