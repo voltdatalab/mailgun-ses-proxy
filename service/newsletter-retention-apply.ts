@@ -11,8 +11,8 @@ import {
     type NewsletterRetentionPolicyInput,
     parseNewsletterRetentionEvidence,
     parseNewsletterRetentionPolicy,
-} from '@/service/newsletter-retention'
-import type { NewsletterRetentionCandidateLoaderRecord } from '@/service/newsletter-retention-candidate-loader'
+} from './newsletter-retention.js'
+import type { NewsletterRetentionCandidateLoaderRecord } from './newsletter-retention-candidate-loader.js'
 
 export const NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION = 1 as const
 const UTC_ISO_8601_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/

@@ -2,8 +2,8 @@ import {
     NEWSLETTER_RETENTION_MAX_BATCH_LIMIT,
     NEWSLETTER_RETENTION_MAX_MESSAGE_LIMIT,
     type NewsletterRetentionPolicy,
-} from '@/service/newsletter-retention'
-import { type NewsletterRetentionSelectionPlanCandidateInput } from '@/service/newsletter-retention-plan'
+} from './newsletter-retention.js'
+import { type NewsletterRetentionSelectionPlanCandidateInput } from './newsletter-retention-plan.js'
 
 export interface NewsletterRetentionCandidateLoaderMessageRow {
     messageId: string

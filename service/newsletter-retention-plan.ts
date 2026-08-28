@@ -1,4 +1,4 @@
-import { parseNewsletterRetentionEvidence, type NewsletterRetentionEvidenceInput, type NewsletterRetentionPolicy } from '@/service/newsletter-retention'
+import { parseNewsletterRetentionEvidence, type NewsletterRetentionEvidenceInput, type NewsletterRetentionPolicy } from './newsletter-retention.js'
 
 export interface NewsletterRetentionSelectionPlanCandidateInput {
     siteId: string
@@ -200,6 +200,9 @@ function normalizeSelectionCandidate(
 }
 
 function compareSelectionCandidates(left: NewsletterRetentionSelectionPlanCandidate, right: NewsletterRetentionSelectionPlanCandidate): number {
+    // Private row IDs intentionally do not enter the public plan. When every
+    // public field ties, the rows are observationally identical here and the
+    // stable sort preserves the loader's exact-ID tie-break for private binding.
     return compareCanonicalStrings(left.createdAt, right.createdAt)
         || compareCanonicalStrings(left.batchId, right.batchId)
         || left.messageCount - right.messageCount

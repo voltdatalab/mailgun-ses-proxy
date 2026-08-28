@@ -2,7 +2,7 @@ import {
     type NewsletterRetentionApplyContext,
     type NewsletterRetentionApplyContextInput,
     parseNewsletterRetentionApplyContext,
-} from '@/service/newsletter-retention-apply'
+} from './newsletter-retention-apply.js'
 
 export const NEWSLETTER_RETENTION_APPLY_LOCK_KEY = 'newsletter-retention-apply'
 

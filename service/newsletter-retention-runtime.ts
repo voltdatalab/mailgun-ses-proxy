@@ -1,11 +1,11 @@
 import { createConnection, type Connection } from 'mariadb'
 
-import { prisma } from '@/lib/database'
+import { prisma } from '../lib/database.js'
 import type {
     NewsletterRetentionApplyDatabase,
     NewsletterRetentionApplyLockLease,
     NewsletterRetentionApplyLockProvider,
-} from '@/service/newsletter-retention-applier'
+} from './newsletter-retention-applier.js'
 
 const MYSQL_NAMED_LOCK_MAX_LENGTH = 64
 
