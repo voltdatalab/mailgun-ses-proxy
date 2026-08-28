@@ -75,9 +75,21 @@ export function buildNewsletterRetentionSelectionPlan(input: NewsletterRetention
     }
 
     const totals = selectedCandidates.reduce<NewsletterRetentionSelectionPlanTotals>((accumulator, candidate) => ({
-        messageCount: accumulator.messageCount + candidate.messageCount,
-        notificationCount: accumulator.notificationCount + candidate.notificationCount,
-        errorCount: accumulator.errorCount + candidate.errorCount,
+        messageCount: safeAddIntegers(
+            accumulator.messageCount,
+            candidate.messageCount,
+            'selectedTotals.messageCount',
+        ),
+        notificationCount: safeAddIntegers(
+            accumulator.notificationCount,
+            candidate.notificationCount,
+            'selectedTotals.notificationCount',
+        ),
+        errorCount: safeAddIntegers(
+            accumulator.errorCount,
+            candidate.errorCount,
+            'selectedTotals.errorCount',
+        ),
     }), {
         messageCount: 0,
         notificationCount: 0,
@@ -234,11 +246,23 @@ function normalizeOpaqueId(value: unknown, field: string): string {
 }
 
 function normalizeCount(value: unknown, field: string): number {
-    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
         throw new Error(`${field} must be a non-negative integer`)
     }
 
     return value
+}
+
+function safeAddIntegers(left: number, right: number, field: string): number {
+    if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right) || left < 0 || right < 0) {
+        throw new Error(`${field} must be a non-negative integer`)
+    }
+
+    if (left > Number.MAX_SAFE_INTEGER - right) {
+        throw new Error(`${field} sum exceeds Number.MAX_SAFE_INTEGER`)
+    }
+
+    return left + right
 }
 
 function compareCanonicalStrings(left: string, right: string): number {

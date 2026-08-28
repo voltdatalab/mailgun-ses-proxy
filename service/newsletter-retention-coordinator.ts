@@ -2,7 +2,6 @@ import {
     buildNewsletterRetentionManifest,
     parseNewsletterRetentionEvidence,
     parseNewsletterRetentionPolicy,
-    type NewsletterRetentionEvidence,
     type NewsletterRetentionEvidenceInput,
     type NewsletterRetentionManifest,
     type NewsletterRetentionManifestInput,

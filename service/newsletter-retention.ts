@@ -45,7 +45,7 @@ export interface NewsletterRetentionEvidenceInput {
     }
 }
 
-export interface NewsletterRetentionEvidence extends NewsletterRetentionEvidenceInput {}
+export type NewsletterRetentionEvidence = NewsletterRetentionEvidenceInput
 
 export interface NewsletterRetentionManifestBatchInput {
     batchId: string
@@ -170,12 +170,11 @@ function normalizeSiteId(siteId: unknown): string {
         throw new Error('siteId must be a non-empty string')
     }
 
-    const normalized = siteId.trim()
-    if (normalized.length === 0) {
+    if (siteId !== siteId.trim() || siteId.length === 0) {
         throw new Error('siteId must be a non-empty string')
     }
 
-    return normalized
+    return siteId
 }
 
 function clampPositiveInteger(value: unknown, fallback: number, max: number, field: string): number {
@@ -253,17 +252,16 @@ function normalizeManifestBatchId(batchId: unknown): string {
         throw new Error('batchId must be a non-empty string')
     }
 
-    const normalized = batchId.trim()
-    if (normalized.length === 0) {
+    if (batchId.trim().length === 0) {
         throw new Error('batchId must be a non-empty string')
     }
 
-    return normalized
+    return batchId
 }
 
 function normalizeCount(value: unknown, field: string): number {
-    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-        throw new Error(`${field} must be a non-negative integer`)
+    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0 || !Number.isSafeInteger(value)) {
+        throw new Error(`${field} must be a non-negative safe integer`)
     }
 
     return value

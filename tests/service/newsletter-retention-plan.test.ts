@@ -198,6 +198,104 @@ describe('service/newsletter-retention-plan', () => {
         })).toThrow('candidate batch orphanCount must be zero')
     })
 
+    it('rejects unsafe injected candidate counts before producing a plan', () => {
+        const policy = parseNewsletterRetentionPolicy({
+            siteId: 'tenant-a',
+            cutoff: '2026-08-27T12:00:00.000Z',
+            maxBatches: 3,
+            maxMessages: 20,
+        })
+        const evidence = parseNewsletterRetentionEvidence({
+            now: '2026-08-27T12:05:00.000Z',
+            backup: {
+                verifiedAt: '2026-08-27T11:00:00.000Z',
+                restoredAt: '2026-08-27T11:05:00.000Z',
+            },
+            restore: {
+                verifiedAt: '2026-08-27T11:10:00.000Z',
+                restoredAt: '2026-08-27T11:15:00.000Z',
+            },
+            health: {
+                queueCheckedAt: '2026-08-27T12:00:00.000Z',
+                proxyCheckedAt: '2026-08-27T12:01:00.000Z',
+                queueHealthy: true,
+                proxyHealthy: true,
+            },
+        })
+
+        expect(() => buildNewsletterRetentionSelectionPlan({
+            policy,
+            evidence,
+            queueHealthy: true,
+            dlqHealthy: true,
+            candidates: [{
+                siteId: 'tenant-a',
+                batchId: 'batch-unsafe-notification-count',
+                createdAt: '2026-08-27T11:59:59.999Z',
+                messageCount: 1,
+                notificationCount: Number.MAX_SAFE_INTEGER + 1,
+                errorCount: 0,
+                orphanCount: 0,
+                correlationComplete: true,
+            }],
+        })).toThrow('notificationCount must be a non-negative integer')
+    })
+
+    it('rejects total notificationCount overflow with sanitized arithmetic protection', () => {
+        const policy = parseNewsletterRetentionPolicy({
+            siteId: 'tenant-a',
+            cutoff: '2026-08-27T12:00:00.000Z',
+            maxBatches: 2,
+            maxMessages: 3,
+        })
+        const evidence = parseNewsletterRetentionEvidence({
+            now: '2026-08-27T12:05:00.000Z',
+            backup: {
+                verifiedAt: '2026-08-27T11:00:00.000Z',
+                restoredAt: '2026-08-27T11:05:00.000Z',
+            },
+            restore: {
+                verifiedAt: '2026-08-27T11:10:00.000Z',
+                restoredAt: '2026-08-27T11:15:00.000Z',
+            },
+            health: {
+                queueCheckedAt: '2026-08-27T12:00:00.000Z',
+                proxyCheckedAt: '2026-08-27T12:01:00.000Z',
+                queueHealthy: true,
+                proxyHealthy: true,
+            },
+        })
+
+        expect(() => buildNewsletterRetentionSelectionPlan({
+            policy,
+            evidence,
+            queueHealthy: true,
+            dlqHealthy: true,
+            candidates: [
+                {
+                    siteId: 'tenant-a',
+                    batchId: 'batch-a',
+                    createdAt: '2026-08-27T11:00:00.000Z',
+                    messageCount: 1,
+                    notificationCount: Number.MAX_SAFE_INTEGER,
+                    errorCount: 0,
+                    orphanCount: 0,
+                    correlationComplete: true,
+                },
+                {
+                    siteId: 'tenant-a',
+                    batchId: 'batch-b',
+                    createdAt: '2026-08-27T11:10:00.000Z',
+                    messageCount: 1,
+                    notificationCount: 1,
+                    errorCount: 0,
+                    orphanCount: 0,
+                    correlationComplete: true,
+                },
+            ],
+        })).toThrow('selectedTotals.notificationCount sum exceeds Number.MAX_SAFE_INTEGER')
+    })
+
     it('stops when queue evidence is unhealthy, DLQ evidence is unhealthy, or caps are exceeded', () => {
         const policy = parseNewsletterRetentionPolicy({
             siteId: 'tenant-a',

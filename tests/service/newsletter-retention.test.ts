@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
     NEWSLETTER_RETENTION_MAX_BATCH_LIMIT,
-    NEWSLETTER_RETENTION_MAX_MESSAGE_LIMIT,
     NEWSLETTER_RETENTION_POLICY_VERSION,
     buildNewsletterRetentionManifest,
     parseNewsletterRetentionEvidence,
@@ -12,7 +11,7 @@ import {
 describe('service/newsletter-retention', () => {
     it('parses strict UTC cutoff values and defaults to dry-run', () => {
         const policy = parseNewsletterRetentionPolicy({
-            siteId: '  poligono  ',
+            siteId: 'poligono',
             cutoff: '2026-08-27T12:34:56.789Z',
             apply: false,
         })
@@ -33,9 +32,27 @@ describe('service/newsletter-retention', () => {
         }).dryRun).toBe(false)
     })
 
+    it('rejects non byte-exact siteId values in retention policy parser', () => {
+        expect(() => parseNewsletterRetentionPolicy({
+            siteId: '  poligono',
+            cutoff: '2026-08-27T12:34:56.789Z',
+            apply: false,
+        })).toThrow('siteId must be a non-empty string')
+
+        expect(() => parseNewsletterRetentionPolicy({
+            siteId: 'poligono  ',
+            cutoff: '2026-08-27T12:34:56.789Z',
+            apply: false,
+        })).toThrow('siteId must be a non-empty string')
+
+        expect(() => parseNewsletterRetentionPolicy({
+            siteId: '   ',
+            cutoff: '2026-08-27T12:34:56.789Z',
+            apply: false,
+        })).toThrow('siteId must be a non-empty string')
+    })
+
     it('rejects blank site ids and non-UTC cutoff strings', () => {
-        expect(() => parseNewsletterRetentionPolicy({ siteId: '   ', cutoff: '2026-08-27T00:00:00.000Z' }))
-            .toThrow('siteId must be a non-empty string')
         expect(() => parseNewsletterRetentionPolicy({ siteId: 'site-a', cutoff: '2026-08-27T00:00:00-03:00' }))
             .toThrow('cutoff must be a strict UTC ISO-8601 string')
         expect(() => parseNewsletterRetentionPolicy({ siteId: 'site-a', cutoff: 'not-a-date' }))
@@ -246,7 +263,29 @@ describe('service/newsletter-retention', () => {
         expect(buildNewsletterRetentionManifest(input)).toEqual(buildNewsletterRetentionManifest(reversed))
     })
 
-    it('refuses fractional manifest counts instead of rewriting them', () => {
+    it('uses deterministic manifest sorting and hash behavior when batch IDs differ only by trailing space', () => {
+        const manifest = buildNewsletterRetentionManifest({
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [
+                { batchId: 'batch-1 ', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 1, notificationCount: 0, errorCount: 0 },
+                { batchId: 'batch-1', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 2, notificationCount: 0, errorCount: 0 },
+            ],
+        })
+
+        expect(manifest.batches.map((batch) => batch.batchId)).toEqual(['batch-1', 'batch-1 '])
+
+        const manifestEquivalentWithoutTrailing = buildNewsletterRetentionManifest({
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [
+                { batchId: 'batch-1', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 2, notificationCount: 0, errorCount: 0 },
+                { batchId: 'batch-1', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 1, notificationCount: 0, errorCount: 0 },
+            ],
+        })
+
+        expect(manifest.hash).not.toBe(manifestEquivalentWithoutTrailing.hash)
+    })
+
+    it('rejects fractional and unsafe manifest counts instead of rewriting them', () => {
         expect(() => buildNewsletterRetentionManifest({
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [{
@@ -256,6 +295,17 @@ describe('service/newsletter-retention', () => {
                 notificationCount: 0,
                 errorCount: 0,
             }],
-        })).toThrow('messageCount must be a non-negative integer')
+        })).toThrow('messageCount must be a non-negative safe integer')
+
+        expect(() => buildNewsletterRetentionManifest({
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [{
+                batchId: 'batch-a',
+                createdAt: '2026-08-24T09:00:00.000Z',
+                messageCount: Number.MAX_SAFE_INTEGER + 1,
+                notificationCount: 0,
+                errorCount: 0,
+            }],
+        })).toThrow('messageCount must be a non-negative safe integer')
     })
 })
