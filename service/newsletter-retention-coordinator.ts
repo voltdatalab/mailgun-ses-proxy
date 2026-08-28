@@ -53,6 +53,7 @@ export async function buildNewsletterRetentionDryRunResult(
         })
 
         const manifest = buildNewsletterRetentionManifest({
+            siteId: policy.siteId,
             cutoff: plan.cutoff,
             policyVersion: policy.policyVersion,
             batches: plan.batches as unknown as NewsletterRetentionManifestInput['batches'],

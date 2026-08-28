@@ -7,6 +7,7 @@ import {
 } from '@/service/newsletter-retention'
 import {
     loadNewsletterRetentionCandidates,
+    loadNewsletterRetentionCandidateRecords,
     type NewsletterRetentionCandidateLoaderDelegate,
 } from '@/service/newsletter-retention-candidate-loader'
 
@@ -194,6 +195,8 @@ describe('service/newsletter-retention-candidate-loader', () => {
 
         expect(candidates[0]).not.toHaveProperty('rowId')
         expect(candidates[1]).not.toHaveProperty('rowId')
+        expect(candidates[0]).not.toHaveProperty('batchRecordId')
+        expect(candidates[1]).not.toHaveProperty('batchRecordId')
     })
 
     it('performs bounded first-phase retrieval and second-phase message/orphan lookups with exact arguments', async () => {
@@ -809,5 +812,82 @@ describe('service/newsletter-retention-candidate-loader', () => {
             maxMessages: 1,
             policyVersion: 1,
         } as never)).rejects.toThrow('cutoff must be a strict UTC ISO-8601 string')
+    })
+
+    it('returns private batchRecordId in the internal record loader while preserving two-phase fetch behavior', async () => {
+        const policy = parseNewsletterRetentionPolicy({
+            siteId: 'tenant-a',
+            cutoff: '2026-08-27T12:00:00.000Z',
+            maxBatches: 2,
+            maxMessages: 10,
+        })
+
+        const { delegate, findMany, messageFindMany, orphanCount } = makeDelegate([
+            {
+                id: 'row-b',
+                batchId: 'batch-b',
+                created: new Date('2026-08-27T11:00:00.000Z'),
+                _count: {
+                    NewslettersErrors: 0,
+                    NewslettersMessages: 1,
+                },
+            },
+            {
+                id: 'row-a',
+                batchId: 'batch-a',
+                created: new Date('2026-08-27T11:30:00.000Z'),
+                _count: {
+                    NewslettersErrors: 0,
+                    NewslettersMessages: 1,
+                },
+            },
+        ], {
+            'row-b': [
+                {
+                    messageId: 'message-b',
+                    _count: {
+                        notificationEvents: 0,
+                    },
+                },
+            ],
+            'row-a': [
+                {
+                    messageId: 'message-a',
+                    _count: {
+                        notificationEvents: 0,
+                    },
+                },
+            ],
+        }, [0, 0])
+
+        const records = await loadNewsletterRetentionCandidateRecords(delegate, policy)
+
+        expect(findMany).toHaveBeenCalledTimes(1)
+        expect(messageFindMany).toHaveBeenCalledTimes(2)
+        expect(orphanCount).toHaveBeenCalledTimes(2)
+        expect(records).toEqual([
+            {
+                siteId: 'tenant-a',
+                batchRecordId: 'row-b',
+                batchId: 'batch-b',
+                createdAt: '2026-08-27T11:00:00.000Z',
+                messageCount: 1,
+                notificationCount: 0,
+                errorCount: 0,
+                orphanCount: 0,
+                correlationComplete: true,
+            },
+            {
+                siteId: 'tenant-a',
+                batchRecordId: 'row-a',
+                batchId: 'batch-a',
+                createdAt: '2026-08-27T11:30:00.000Z',
+                messageCount: 1,
+                notificationCount: 0,
+                errorCount: 0,
+                orphanCount: 0,
+                correlationComplete: true,
+            },
+        ])
     })
 })

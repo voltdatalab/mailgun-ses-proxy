@@ -65,12 +65,14 @@ export interface NewsletterRetentionManifestBatch {
 }
 
 export interface NewsletterRetentionManifestInput {
+    siteId: string
     cutoff: string
     policyVersion?: number
     batches: NewsletterRetentionManifestBatchInput[]
 }
 
 export interface NewsletterRetentionManifest {
+    siteId: string
     cutoff: string
     policyVersion: number
     batches: NewsletterRetentionManifestBatch[]
@@ -143,17 +145,19 @@ export function buildNewsletterRetentionManifest(input: NewsletterRetentionManif
         throw new Error('manifest input must be a plain object with batches')
     }
 
+    const siteId = normalizeManifestSiteId((input as { siteId?: unknown }).siteId)
     const cutoff = parseStrictUtcIso(input.cutoff, 'cutoff')
     const policyVersion = normalizePolicyVersion(input.policyVersion)
     const batches = [...input.batches]
         .map(normalizeManifestBatch)
-        .sort((left, right) => compareCanonicalStrings(left.batchId, right.batchId)
-            || compareCanonicalStrings(left.createdAt, right.createdAt)
+        .sort((left, right) => compareCanonicalStrings(left.createdAt, right.createdAt)
+            || compareCanonicalStrings(left.batchId, right.batchId)
             || left.messageCount - right.messageCount
             || left.notificationCount - right.notificationCount
             || left.errorCount - right.errorCount)
 
     const payload = {
+        siteId,
         batches,
         cutoff: toUtcIso(cutoff),
         policyVersion,
@@ -166,6 +170,18 @@ export function buildNewsletterRetentionManifest(input: NewsletterRetentionManif
 }
 
 function normalizeSiteId(siteId: unknown): string {
+    if (typeof siteId !== 'string') {
+        throw new Error('siteId must be a non-empty string')
+    }
+
+    if (siteId !== siteId.trim() || siteId.length === 0) {
+        throw new Error('siteId must be a non-empty string')
+    }
+
+    return siteId
+}
+
+function normalizeManifestSiteId(siteId: unknown): string {
     if (typeof siteId !== 'string') {
         throw new Error('siteId must be a non-empty string')
     }
@@ -198,8 +214,8 @@ function normalizePolicyVersion(value: unknown): number {
         return NEWSLETTER_RETENTION_POLICY_VERSION
     }
 
-    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-        throw new Error('policyVersion must be a positive integer')
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+        throw new Error('policyVersion must be a positive safe integer')
     }
 
     return value

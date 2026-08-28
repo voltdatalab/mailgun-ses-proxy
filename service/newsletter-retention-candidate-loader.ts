@@ -12,6 +12,18 @@ export interface NewsletterRetentionCandidateLoaderMessageRow {
     }
 }
 
+export interface NewsletterRetentionCandidateLoaderRecord {
+    siteId: string
+    batchRecordId: string
+    batchId: string
+    createdAt: string
+    messageCount: number
+    notificationCount: number
+    errorCount: number
+    orphanCount: number
+    correlationComplete: boolean
+}
+
 export interface NewsletterRetentionCandidateLoaderRow {
     id: string
     batchId: string
@@ -83,7 +95,7 @@ export interface NewsletterRetentionCandidateLoaderDelegate {
 const UTC_ISO_8601_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 interface NormalizedBatchAggregateRow {
-    rowId: string
+    batchRecordId: string
     batchId: string
     createdAt: string
     messageCount: number
@@ -92,7 +104,7 @@ interface NormalizedBatchAggregateRow {
 
 interface NormalizedCandidateState {
     batchId: string
-    rowId: string
+    batchRecordId: string
     createdAt: string
     messageCount: number
     notificationCount: number
@@ -104,6 +116,24 @@ export async function loadNewsletterRetentionCandidates(
     delegate: NewsletterRetentionCandidateLoaderDelegate,
     policy: NewsletterRetentionPolicy,
 ): Promise<NewsletterRetentionSelectionPlanCandidateInput[]> {
+    const records = await loadNewsletterRetentionCandidateRecords(delegate, policy)
+
+    return records.map((record) => ({
+        siteId: record.siteId,
+        batchId: record.batchId,
+        createdAt: record.createdAt,
+        messageCount: record.messageCount,
+        notificationCount: record.notificationCount,
+        errorCount: record.errorCount,
+        orphanCount: record.orphanCount,
+        correlationComplete: record.correlationComplete,
+    }))
+}
+
+export async function loadNewsletterRetentionCandidateRecords(
+    delegate: NewsletterRetentionCandidateLoaderDelegate,
+    policy: NewsletterRetentionPolicy,
+): Promise<NewsletterRetentionCandidateLoaderRecord[]> {
     const siteId = normalizeSiteId(policy?.siteId)
     const cutoff = parseStrictUtcIso(policy?.cutoff, 'cutoff')
     const maxBatches = normalizeLimitedPositiveInteger(
@@ -158,8 +188,8 @@ export async function loadNewsletterRetentionCandidates(
     for (const summary of batchSummaries) {
         if (summary.messageCount === 0) {
             loadedCandidates.push({
+                batchRecordId: summary.batchRecordId,
                 batchId: summary.batchId,
-                rowId: summary.rowId,
                 createdAt: summary.createdAt,
                 messageCount: 0,
                 notificationCount: 0,
@@ -172,7 +202,7 @@ export async function loadNewsletterRetentionCandidates(
 
         const messageRows = await delegate.newsletterMessages.findMany({
             where: {
-                newsletterBatchId: summary.rowId,
+                newsletterBatchId: summary.batchRecordId,
             },
             orderBy: [{ id: 'asc' }],
             take: summary.messageCount + 1,
@@ -199,8 +229,8 @@ export async function loadNewsletterRetentionCandidates(
         const orphanCount = await countBatchLinkedOrphans(delegate, messageIds)
 
         loadedCandidates.push({
+            batchRecordId: summary.batchRecordId,
             batchId: summary.batchId,
-            rowId: summary.rowId,
             createdAt: summary.createdAt,
             messageCount: summary.messageCount,
             notificationCount,
@@ -214,6 +244,7 @@ export async function loadNewsletterRetentionCandidates(
         .sort(compareNormalizedCandidates)
         .map((candidate) => ({
             siteId,
+            batchRecordId: candidate.batchRecordId,
             batchId: candidate.batchId,
             createdAt: candidate.createdAt,
             messageCount: candidate.messageCount,
@@ -232,7 +263,7 @@ function normalizeBatchAggregateRow(row: NewsletterRetentionCandidateLoaderRow):
     const counts = normalizeCountAggregate((row as { _count?: unknown })._count)
 
     return {
-        rowId: normalizeRowId((row as { id?: unknown }).id),
+        batchRecordId: normalizeRowId((row as { id?: unknown }).id),
         batchId: normalizeBatchId((row as { batchId?: unknown }).batchId),
         createdAt: normalizeCreatedAt((row as { created?: unknown }).created),
         messageCount: counts.NewslettersMessages,
@@ -413,15 +444,15 @@ function safeAddIntegers(left: number, right: number, field: string): number {
 }
 
 function compareNormalizedCandidates(
-    left: NormalizedCandidateState & { orphanCount: number },
-    right: NormalizedCandidateState & { orphanCount: number },
+    left: (NormalizedCandidateState & { orphanCount: number; batchRecordId: string }),
+    right: (NormalizedCandidateState & { orphanCount: number; batchRecordId: string }),
 ): number {
     return compareStrings(left.createdAt, right.createdAt)
         || compareStrings(left.batchId, right.batchId)
         || left.messageCount - right.messageCount
         || left.notificationCount - right.notificationCount
         || left.errorCount - right.errorCount
-        || compareStrings(left.rowId, right.rowId)
+        || compareStrings(left.batchRecordId, right.batchRecordId)
 }
 
 function normalizeLimitedPositiveInteger(value: number, field: string, max: number): number {

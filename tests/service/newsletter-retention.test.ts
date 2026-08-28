@@ -177,6 +177,7 @@ describe('service/newsletter-retention', () => {
 
     it('builds a canonical manifest with sorted batches, sanitized fields, and a deterministic SHA-256 hash', () => {
         const manifest = buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             policyVersion: NEWSLETTER_RETENTION_POLICY_VERSION,
             batches: [
@@ -235,16 +236,18 @@ describe('service/newsletter-retention', () => {
             expect(serialized).not.toContain(forbidden)
         }
 
-        expect(manifest.hash).toBe('2419becc182be9edf41a90cd4115d51a0209cd96029b1ebb0aead74fa3f1b5de')
+        expect(manifest.hash).toBe('86e5e280b85fd96335788ac4c2b8f9093cee016c901e1aa0bf795c0108d2cc18')
         expect(manifest.hash).toMatch(/^[a-f0-9]{64}$/)
     })
 
     it('rejects malformed manifest containers and array-shaped batches', () => {
         expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: {} as unknown as [],
         })).toThrow('manifest input must be a plain object with batches')
         expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [[] as unknown as never],
         })).toThrow('manifest batch must be a plain object')
@@ -252,6 +255,7 @@ describe('service/newsletter-retention', () => {
 
     it('uses a total canonical batch order when IDs and timestamps tie', () => {
         const input = {
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [
                 { batchId: 'same', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 2, notificationCount: 0, errorCount: 0 },
@@ -265,6 +269,7 @@ describe('service/newsletter-retention', () => {
 
     it('uses deterministic manifest sorting and hash behavior when batch IDs differ only by trailing space', () => {
         const manifest = buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [
                 { batchId: 'batch-1 ', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 1, notificationCount: 0, errorCount: 0 },
@@ -275,6 +280,7 @@ describe('service/newsletter-retention', () => {
         expect(manifest.batches.map((batch) => batch.batchId)).toEqual(['batch-1', 'batch-1 '])
 
         const manifestEquivalentWithoutTrailing = buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [
                 { batchId: 'batch-1', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 2, notificationCount: 0, errorCount: 0 },
@@ -287,6 +293,7 @@ describe('service/newsletter-retention', () => {
 
     it('rejects fractional and unsafe manifest counts instead of rewriting them', () => {
         expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [{
                 batchId: 'batch-a',
@@ -298,6 +305,7 @@ describe('service/newsletter-retention', () => {
         })).toThrow('messageCount must be a non-negative safe integer')
 
         expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono',
             cutoff: '2026-08-27T00:00:00.000Z',
             batches: [{
                 batchId: 'batch-a',
@@ -307,5 +315,47 @@ describe('service/newsletter-retention', () => {
                 errorCount: 0,
             }],
         })).toThrow('messageCount must be a non-negative safe integer')
+    })
+
+    it('rejects malformed manifest siteId values and whitespace-only variants', () => {
+        expect(() => buildNewsletterRetentionManifest({
+            siteId: '  poligono',
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [],
+        })).toThrow('siteId must be a non-empty string')
+
+        expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono ',
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [],
+        })).toThrow('siteId must be a non-empty string')
+
+        expect(() => buildNewsletterRetentionManifest({
+            siteId: '   ',
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [],
+        })).toThrow('siteId must be a non-empty string')
+    })
+
+    it('uses createdAt before batchId in the canonical end-to-end order', () => {
+        const manifest = buildNewsletterRetentionManifest({
+            siteId: 'poligono',
+            cutoff: '2026-08-27T00:00:00.000Z',
+            batches: [
+                { batchId: 'a-later', createdAt: '2026-08-25T09:00:00.000Z', messageCount: 1, notificationCount: 0, errorCount: 0 },
+                { batchId: 'z-earlier', createdAt: '2026-08-24T09:00:00.000Z', messageCount: 1, notificationCount: 0, errorCount: 0 },
+            ],
+        })
+
+        expect(manifest.batches.map((batch) => batch.batchId)).toEqual(['z-earlier', 'a-later'])
+    })
+
+    it('rejects unsafe policy versions at manifest construction', () => {
+        expect(() => buildNewsletterRetentionManifest({
+            siteId: 'poligono',
+            cutoff: '2026-08-27T00:00:00.000Z',
+            policyVersion: Number.MAX_SAFE_INTEGER + 1,
+            batches: [],
+        })).toThrow('policyVersion must be a positive safe integer')
     })
 })

@@ -97,6 +97,7 @@ describe('service/newsletter-retention-coordinator', () => {
                 ],
             },
             manifest: {
+                siteId: 'tenant-a',
                 cutoff: '2026-08-27T12:00:00.000Z',
                 policyVersion: NEWSLETTER_RETENTION_POLICY_VERSION,
                 batches: [
@@ -115,12 +116,14 @@ describe('service/newsletter-retention-coordinator', () => {
                         errorCount: 1,
                     },
                 ],
-                hash: '0376629b2ae0472643807a25404ecfecf7312b4138056fc7ed3647810e93867e',
+                hash: '7a1b063135efa197e59a2c3c8dff870445cff6216d0f1e22a69d26ea1492abc7',
             },
         })
 
         const serialized = JSON.stringify(result)
         for (const forbidden of [
+            'batchRecordId',
+            'rowId',
             'queueHealthy',
             'proxyCheckedAt',
             'backup',
