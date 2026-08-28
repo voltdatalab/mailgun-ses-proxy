@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { lstat, open, unlink } from 'node:fs/promises'
+import { open } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 
 import {
@@ -40,7 +40,6 @@ export interface NewsletterRetentionCliDependencies {
     now(): Date
     readJsonFile(path: string, privacy: 'public' | 'private'): Promise<unknown>
     writeJsonFileExclusive(path: string, value: unknown, mode: 0o600 | 0o644): Promise<void>
-    removeOutputFile(path: string): Promise<void>
 }
 
 export interface NewsletterRetentionCliDryRunOutput {
@@ -174,48 +173,27 @@ export async function writeNewsletterRetentionJsonFileExclusive(
         handle = await open(
             parent.boundFilePath,
             constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-            mode,
+            0o000,
         )
         created = true
         await handle.writeFile(serialized, { encoding: 'utf8' })
+        await handle.sync()
         await handle.chmod(mode)
         await handle.sync()
         await parent.handle.sync()
     } catch {
         if (created) {
-            await handle?.close().catch(() => undefined)
-            handle = null
             try {
-                if (!parent) throw new Error('missing bound parent')
-                await unlink(parent.boundFilePath)
-                await parent.handle.sync()
+                if (!handle) throw new Error('missing output handle')
+                await handle.chmod(0o000)
+                await handle.sync()
             } catch {
-                throw new NewsletterRetentionCliError('newsletter retention output rollback failed')
+                throw new NewsletterRetentionCliError('newsletter retention output quarantine failed')
             }
         }
         throw new NewsletterRetentionCliError('newsletter retention output file could not be created')
     } finally {
         await handle?.close().catch(() => undefined)
-        await parent?.handle.close().catch(() => undefined)
-    }
-}
-
-export async function removeNewsletterRetentionOutputFile(path: string): Promise<void> {
-    const normalizedPath = normalizeAbsolutePath(path, 'output file')
-    let parent: BoundParentDirectory | null = null
-    try {
-        parent = await openBoundParentDirectory(normalizedPath)
-        const stat = await lstat(parent.boundFilePath)
-        const getuid = process.getuid
-        const currentUid = typeof getuid === 'function' ? getuid.call(process) : null
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (currentUid !== null && stat.uid !== currentUid)) {
-            throw new Error('output rollback target is unsafe')
-        }
-        await unlink(parent.boundFilePath)
-        await parent.handle.sync()
-    } catch {
-        throw new NewsletterRetentionCliError('newsletter retention output rollback failed')
-    } finally {
         await parent?.handle.close().catch(() => undefined)
     }
 }
@@ -299,25 +277,11 @@ async function executeDryRun(
         artifact = buildNewsletterRetentionApplyArtifact({ manifest, records })
     }
 
-    const writtenPaths: string[] = []
-    try {
-        if (options.manifestOut) {
-            await dependencies.writeJsonFileExclusive(options.manifestOut, manifest, 0o644)
-            writtenPaths.push(options.manifestOut)
-        }
-        if (options.privateArtifactOut && artifact) {
-            await dependencies.writeJsonFileExclusive(options.privateArtifactOut, artifact, 0o600)
-            writtenPaths.push(options.privateArtifactOut)
-        }
-    } catch (error) {
-        for (const path of writtenPaths.reverse()) {
-            try {
-                await dependencies.removeOutputFile(path)
-            } catch {
-                throw new NewsletterRetentionCliError('newsletter retention output rollback failed')
-            }
-        }
-        throw error
+    if (options.privateArtifactOut && artifact) {
+        await dependencies.writeJsonFileExclusive(options.privateArtifactOut, artifact, 0o600)
+    }
+    if (options.manifestOut) {
+        await dependencies.writeJsonFileExclusive(options.manifestOut, manifest, 0o644)
     }
 
     return {

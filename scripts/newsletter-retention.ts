@@ -3,7 +3,6 @@ import {
     executeNewsletterRetentionCli,
     NewsletterRetentionCliError,
     readNewsletterRetentionJsonFile,
-    removeNewsletterRetentionOutputFile,
     writeNewsletterRetentionJsonFileExclusive,
     type NewsletterRetentionCliDatabase,
 } from '../service/newsletter-retention-cli.js'
@@ -21,7 +20,6 @@ async function main(): Promise<void> {
         now: () => new Date(),
         readJsonFile: readNewsletterRetentionJsonFile,
         writeJsonFileExclusive: writeNewsletterRetentionJsonFileExclusive,
-        removeOutputFile: removeNewsletterRetentionOutputFile,
     })
 
     process.stdout.write(`${JSON.stringify(output)}\n`)

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const raceHook = vi.hoisted(() => ({
     suffix: null as string | null,
     beforeFinalOperation: null as (() => Promise<void>) | null,
+    failWriteAfterPartial: false,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -23,20 +24,31 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         ...actual,
         open: async (path: unknown, flags: number | string, mode?: number) => {
             await trigger(path)
-            return mode === undefined
-                ? actual.open(path as string, flags)
-                : actual.open(path as string, flags, mode)
-        },
-        lstat: async (path: unknown) => {
-            await trigger(path)
-            return actual.lstat(path as string)
+            const handle = mode === undefined
+                ? await actual.open(path as string, flags)
+                : await actual.open(path as string, flags, mode)
+            if (!raceHook.failWriteAfterPartial || !raceHook.suffix || !String(path).endsWith(`/${raceHook.suffix}`)) {
+                return handle
+            }
+            raceHook.failWriteAfterPartial = false
+            return new Proxy(handle, {
+                get(target, property) {
+                    if (property === 'writeFile') {
+                        return async () => {
+                            await target.writeFile('partial')
+                            throw new Error('injected write failure')
+                        }
+                    }
+                    const value = Reflect.get(target, property, target) as unknown
+                    return typeof value === 'function' ? value.bind(target) : value
+                },
+            })
         },
     }
 })
 
 import {
     readNewsletterRetentionJsonFile,
-    removeNewsletterRetentionOutputFile,
     writeNewsletterRetentionJsonFileExclusive,
 } from '@/service/newsletter-retention-cli'
 
@@ -45,6 +57,7 @@ const temporaryDirectories: string[] = []
 afterEach(async () => {
     raceHook.suffix = null
     raceHook.beforeFinalOperation = null
+    raceHook.failWriteAfterPartial = false
     const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     await Promise.all(temporaryDirectories.splice(0).map((path) => fs.rm(path, { recursive: true, force: true })))
 })
@@ -97,18 +110,19 @@ describe('newsletter retention CLI descriptor-bound file operations', () => {
         await expect(fixture.fs.stat(join(fixture.attacker, 'output.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     })
 
-    it('removes only from the opened parent when the original ancestor is replaced before unlink', async () => {
+    it('quarantines a partially written output by inode without unlinking its path', async () => {
         const fixture = await makeRaceFixture()
-        await fixture.fs.writeFile(join(fixture.vetted, 'output.json'), '{"owner":"vetted"}\n', { mode: 0o600 })
-        await fixture.fs.writeFile(join(fixture.attacker, 'output.json'), '{"owner":"attacker"}\n', { mode: 0o600 })
         raceHook.suffix = 'output.json'
-        raceHook.beforeFinalOperation = fixture.swapAncestor
+        raceHook.failWriteAfterPartial = true
 
-        await removeNewsletterRetentionOutputFile(join(fixture.vetted, 'output.json'))
+        await expect(writeNewsletterRetentionJsonFileExclusive(
+            join(fixture.vetted, 'output.json'),
+            { destination: 'vetted' },
+            0o600,
+        )).rejects.toThrow('newsletter retention output file could not be created')
 
-        await expect(fixture.fs.stat(join(fixture.moved, 'output.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-        expect(JSON.parse(await fixture.fs.readFile(join(fixture.attacker, 'output.json'), 'utf8'))).toEqual({
-            owner: 'attacker',
-        })
+        const stat = await fixture.fs.stat(join(fixture.vetted, 'output.json'))
+        expect(stat.mode & 0o777).toBe(0o000)
+        expect(stat.size).toBe(Buffer.byteLength('partial'))
     })
 })

@@ -129,16 +129,12 @@ function makeDependencies(files: Record<string, unknown> = { [EVIDENCE_PATH]: ev
         void value
         void mode
     })
-    const removeOutputFile = vi.fn(async (path: string) => {
-        void path
-    })
     const dependencies: NewsletterRetentionCliDependencies = {
         database,
         createLockProvider,
         now: () => new Date(NOW),
         readJsonFile,
         writeJsonFileExclusive,
-        removeOutputFile,
     }
     return {
         dependencies,
@@ -150,7 +146,6 @@ function makeDependencies(files: Record<string, unknown> = { [EVIDENCE_PATH]: ev
         createLockProvider,
         readJsonFile,
         writeJsonFileExclusive,
-        removeOutputFile,
     }
 }
 
@@ -231,11 +226,11 @@ describe('newsletter retention CLI engine', () => {
         const output = await executeNewsletterRetentionCli(args, harness.dependencies)
 
         expect(harness.writeJsonFileExclusive).toHaveBeenCalledTimes(2)
-        expect(harness.writeJsonFileExclusive.mock.calls[0][0]).toBe(MANIFEST_OUT_PATH)
-        expect(harness.writeJsonFileExclusive.mock.calls[0][2]).toBe(0o644)
-        expect(harness.writeJsonFileExclusive.mock.calls[1][0]).toBe(ARTIFACT_OUT_PATH)
-        expect(harness.writeJsonFileExclusive.mock.calls[1][2]).toBe(0o600)
-        expect(JSON.stringify(harness.writeJsonFileExclusive.mock.calls[1][1])).toContain(privateRecord.batchRecordId)
+        expect(harness.writeJsonFileExclusive.mock.calls[0][0]).toBe(ARTIFACT_OUT_PATH)
+        expect(harness.writeJsonFileExclusive.mock.calls[0][2]).toBe(0o600)
+        expect(harness.writeJsonFileExclusive.mock.calls[1][0]).toBe(MANIFEST_OUT_PATH)
+        expect(harness.writeJsonFileExclusive.mock.calls[1][2]).toBe(0o644)
+        expect(JSON.stringify(harness.writeJsonFileExclusive.mock.calls[0][1])).toContain(privateRecord.batchRecordId)
         expect(JSON.stringify(output)).not.toContain(privateRecord.batchRecordId)
         if (output.mode !== 'dry-run') throw new Error('expected dry-run output')
         expect(output.privateArtifact.written).toBe(true)
@@ -288,11 +283,11 @@ describe('newsletter retention CLI engine', () => {
         expect(harness.database.newsletterBatch.findMany).not.toHaveBeenCalled()
     })
 
-    it('rolls back the first dry-run output when the paired private write fails', async () => {
+    it('writes the private artifact first and never deletes it when the public manifest write fails', async () => {
         const harness = makeDependencies()
         harness.writeJsonFileExclusive
             .mockResolvedValueOnce(undefined)
-            .mockRejectedValueOnce(new Error('second write failed'))
+            .mockRejectedValueOnce(new Error('public write failed'))
 
         await expect(executeNewsletterRetentionCli([
             ...baseArgs(),
@@ -300,22 +295,8 @@ describe('newsletter retention CLI engine', () => {
             '--private-artifact-out', ARTIFACT_OUT_PATH,
         ], harness.dependencies)).rejects.toThrow('newsletter retention dry-run failed')
 
-        expect(harness.removeOutputFile).toHaveBeenCalledOnce()
-        expect(harness.removeOutputFile).toHaveBeenCalledWith(MANIFEST_OUT_PATH)
-    })
-
-    it('fails closed when paired-output rollback cannot remove the first file', async () => {
-        const harness = makeDependencies()
-        harness.writeJsonFileExclusive
-            .mockResolvedValueOnce(undefined)
-            .mockRejectedValueOnce(new Error('second write failed'))
-        harness.removeOutputFile.mockRejectedValueOnce(new Error('remove failed'))
-
-        await expect(executeNewsletterRetentionCli([
-            ...baseArgs(),
-            '--manifest-out', MANIFEST_OUT_PATH,
-            '--private-artifact-out', ARTIFACT_OUT_PATH,
-        ], harness.dependencies)).rejects.toThrow('newsletter retention output rollback failed')
+        expect(harness.writeJsonFileExclusive).toHaveBeenNthCalledWith(1, ARTIFACT_OUT_PATH, expect.any(Object), 0o600)
+        expect(harness.writeJsonFileExclusive).toHaveBeenNthCalledWith(2, MANIFEST_OUT_PATH, expect.any(Object), 0o644)
     })
 
     it('requires all apply confirmations before reading files or touching the database', async () => {
