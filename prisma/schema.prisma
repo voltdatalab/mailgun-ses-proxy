@@ -69,8 +69,9 @@ model NewsletterNotificationOrphan {
   rawEvent       String   @db.Text
   reason         String
   created        DateTime @default(now())
+  reconciledAt   DateTime?
 
-  @@index([messageId, created], map: "idx_newsletter_notification_orphans_message_created")
+  @@index([messageId, reconciledAt, created], map: "idx_newsletter_notification_orphans_message_reconciled_created")
 }
 
 model SystemMailNotifications {
