@@ -20,7 +20,8 @@ RUN bun install --frozen-lockfile
 # Copy the rest of the application code
 COPY --chown=bun:bun . .
 
-# Run build scripts (Prisma generate, Next build, and custom server build)
+# Run build scripts. The artifact check keeps the explicit, operator-invoked
+# orphan reconciler in the same image as the deployed application.
 RUN DATABASE_URL=mysql://localhost:3306/dummy bun run build
 
 # Expose the application port
