@@ -425,6 +425,7 @@ describe('newsletter retention CLI file safety', () => {
 
         expect((await stat(path)).mode & 0o777).toBe(0o600)
         expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ secret: 'private' })
+        await expect(writeNewsletterRetentionJsonFileExclusive(path, { secret: 'private' }, 0o600)).resolves.toBeUndefined()
         await expect(writeNewsletterRetentionJsonFileExclusive(path, { changed: true }, 0o600)).rejects.toThrow(
             'newsletter retention output file could not be created',
         )

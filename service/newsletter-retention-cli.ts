@@ -1,6 +1,8 @@
+import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
     buildNewsletterRetentionManifest,
@@ -31,6 +33,13 @@ const MAX_JSON_FILE_BYTES = 1_048_576
 const MAX_DLQ_EVIDENCE_AGE_MS = 15 * 60_000
 const UTC_ISO_8601_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const SHA_256_HEX = /^[a-f0-9]{64}$/
+// Node and Bun do not currently export Linux's __O_TMPFILE flag by name.
+const LINUX_O_TMPFILE = 0o20000000 | constants.O_DIRECTORY
+const LINK_HELPER_DESTINATION_EXISTS = 73
+const LINK_HELPER_PATHS = [
+    '/usr/local/libexec/newsletter-retention-linkat',
+    resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/newsletter-retention-linkat'),
+]
 
 export type NewsletterRetentionCliDatabase = NewsletterRetentionCandidateLoaderDelegate & NewsletterRetentionApplyDatabase
 
@@ -161,41 +170,137 @@ export async function writeNewsletterRetentionJsonFileExclusive(
     const normalizedPath = normalizeAbsolutePath(path, 'output file')
     let handle: Awaited<ReturnType<typeof open>> | null = null
     let parent: BoundParentDirectory | null = null
-    let created = false
 
     try {
         const serialized = `${JSON.stringify(value)}\n`
-        if (Buffer.byteLength(serialized, 'utf8') > MAX_JSON_FILE_BYTES) {
+        const serializedBuffer = Buffer.from(serialized, 'utf8')
+        if (serializedBuffer.byteLength > MAX_JSON_FILE_BYTES) {
             throw new Error('output too large')
         }
 
-        parent = await openBoundParentDirectory(normalizedPath)
+        const boundParent = await openBoundParentDirectory(normalizedPath)
+        parent = boundParent
         handle = await open(
-            parent.boundFilePath,
-            constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+            `/proc/self/fd/${boundParent.handle.fd}`,
+            constants.O_WRONLY | LINUX_O_TMPFILE,
             0o000,
         )
-        created = true
-        await handle.writeFile(serialized, { encoding: 'utf8' })
+        await handle.writeFile(serializedBuffer)
         await handle.sync()
         await handle.chmod(mode)
         await handle.sync()
-        await parent.handle.sync()
-    } catch {
-        if (created) {
-            try {
-                if (!handle) throw new Error('missing output handle')
-                await handle.chmod(0o000)
-                await handle.sync()
-            } catch {
-                throw new NewsletterRetentionCliError('newsletter retention output quarantine failed')
-            }
+
+        const publication = await publishNewsletterRetentionOutput(handle, boundParent)
+        if (publication === 'exists') {
+            const exact = await existingNewsletterRetentionOutputIsExact(boundParent, serializedBuffer, mode)
+            if (!exact) throw new Error('output path already exists with different content or metadata')
         }
+        await boundParent.handle.sync()
+    } catch (error) {
+        if (error instanceof NewsletterRetentionCliError) throw error
         throw new NewsletterRetentionCliError('newsletter retention output file could not be created')
     } finally {
         await handle?.close().catch(() => undefined)
         await parent?.handle.close().catch(() => undefined)
     }
+}
+
+async function publishNewsletterRetentionOutput(
+    source: Awaited<ReturnType<typeof open>>,
+    parent: BoundParentDirectory,
+): Promise<'published' | 'exists'> {
+    let helperResult: number | null = null
+    for (const helperPath of LINK_HELPER_PATHS) {
+        try {
+            helperResult = await runNewsletterRetentionLinkCommand(
+                helperPath,
+                [parent.fileName],
+                source.fd,
+                parent.handle.fd,
+            )
+            break
+        } catch (error) {
+            if (!isMissingExecutableError(error)) throw error
+        }
+    }
+
+    if (helperResult === null) {
+        if (process.env.NODE_ENV === 'production') {
+            throw new Error('newsletter retention output publication helper is missing')
+        }
+        helperResult = await runNewsletterRetentionLinkCommand(
+            '/bin/ln',
+            [
+                '-L',
+                '--',
+                '/proc/self/fd/3',
+                `/proc/self/fd/4/${parent.fileName}`,
+            ],
+            source.fd,
+            parent.handle.fd,
+        )
+        if (helperResult !== 0) {
+            return 'exists'
+        }
+    }
+
+    if (helperResult === 0) return 'published'
+    if (helperResult === LINK_HELPER_DESTINATION_EXISTS) return 'exists'
+    throw new Error('newsletter retention output publication failed')
+}
+
+async function runNewsletterRetentionLinkCommand(
+    command: string,
+    args: string[],
+    sourceFd: number,
+    parentFd: number,
+): Promise<number> {
+    return new Promise((resolvePromise, rejectPromise) => {
+        const child = spawn(command, args, {
+            stdio: ['ignore', 'ignore', 'ignore', sourceFd, parentFd],
+        })
+        child.once('error', rejectPromise)
+        child.once('close', (code, signal) => {
+            if (signal !== null || code === null) {
+                rejectPromise(new Error('newsletter retention output publication helper failed'))
+                return
+            }
+            resolvePromise(code)
+        })
+    })
+}
+
+async function existingNewsletterRetentionOutputIsExact(
+    parent: BoundParentDirectory,
+    expected: Buffer,
+    mode: 0o600 | 0o644,
+): Promise<boolean> {
+    let existing: Awaited<ReturnType<typeof open>> | null = null
+    try {
+        existing = await open(parent.boundFilePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+        const stat = await existing.stat()
+        const getuid = process.getuid
+        const currentUid = typeof getuid === 'function' ? getuid.call(process) : null
+        if (
+            !stat.isFile()
+            || stat.nlink !== 1
+            || stat.size !== expected.byteLength
+            || (stat.mode & 0o777) !== mode
+            || (currentUid !== null && stat.uid !== currentUid)
+        ) {
+            return false
+        }
+        const contents = await existing.readFile()
+        return contents.equals(expected)
+    } catch {
+        return false
+    } finally {
+        await existing?.close().catch(() => undefined)
+    }
+}
+
+function isMissingExecutableError(error: unknown): boolean {
+    return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT'
 }
 
 async function executeDryRunWithLock(
@@ -555,6 +660,7 @@ function ensureDistinctPaths(paths: Array<string | undefined>): void {
 interface BoundParentDirectory {
     handle: Awaited<ReturnType<typeof open>>
     boundFilePath: string
+    fileName: string
 }
 
 async function openBoundParentDirectory(path: string): Promise<BoundParentDirectory> {
@@ -583,6 +689,7 @@ async function openBoundParentDirectory(path: string): Promise<BoundParentDirect
         return {
             handle: current,
             boundFilePath: `/proc/self/fd/${current.fd}/${fileName}`,
+            fileName,
         }
     } catch (error) {
         await current.close().catch(() => undefined)

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const raceHook = vi.hoisted(() => ({
     suffix: null as string | null,
     beforeFinalOperation: null as (() => Promise<void>) | null,
+    triggerOnTmpfile: false,
     failWriteAfterPartial: false,
 }))
 
@@ -23,11 +24,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     return {
         ...actual,
         open: async (path: unknown, flags: number | string, mode?: number) => {
-            await trigger(path)
+            const isTmpfile = typeof flags === 'number' && (flags & 0o20000000) !== 0
+            if (isTmpfile && raceHook.triggerOnTmpfile && raceHook.beforeFinalOperation) {
+                const operation = raceHook.beforeFinalOperation
+                raceHook.beforeFinalOperation = null
+                await operation()
+            } else {
+                await trigger(path)
+            }
             const handle = mode === undefined
                 ? await actual.open(path as string, flags)
                 : await actual.open(path as string, flags, mode)
-            if (!raceHook.failWriteAfterPartial || !raceHook.suffix || !String(path).endsWith(`/${raceHook.suffix}`)) {
+            if (!raceHook.failWriteAfterPartial || !isTmpfile) {
                 return handle
             }
             raceHook.failWriteAfterPartial = false
@@ -57,6 +65,7 @@ const temporaryDirectories: string[] = []
 afterEach(async () => {
     raceHook.suffix = null
     raceHook.beforeFinalOperation = null
+    raceHook.triggerOnTmpfile = false
     raceHook.failWriteAfterPartial = false
     const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     await Promise.all(temporaryDirectories.splice(0).map((path) => fs.rm(path, { recursive: true, force: true })))
@@ -96,6 +105,7 @@ describe('newsletter retention CLI descriptor-bound file operations', () => {
     it('writes into the opened parent when the original ancestor is replaced before final open', async () => {
         const fixture = await makeRaceFixture()
         raceHook.suffix = 'output.json'
+        raceHook.triggerOnTmpfile = true
         raceHook.beforeFinalOperation = fixture.swapAncestor
 
         await writeNewsletterRetentionJsonFileExclusive(
@@ -110,9 +120,8 @@ describe('newsletter retention CLI descriptor-bound file operations', () => {
         await expect(fixture.fs.stat(join(fixture.attacker, 'output.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     })
 
-    it('quarantines a partially written output by inode without unlinking its path', async () => {
+    it('discards a partially written anonymous inode without publishing any path', async () => {
         const fixture = await makeRaceFixture()
-        raceHook.suffix = 'output.json'
         raceHook.failWriteAfterPartial = true
 
         await expect(writeNewsletterRetentionJsonFileExclusive(
@@ -121,8 +130,7 @@ describe('newsletter retention CLI descriptor-bound file operations', () => {
             0o600,
         )).rejects.toThrow('newsletter retention output file could not be created')
 
-        const stat = await fixture.fs.stat(join(fixture.vetted, 'output.json'))
-        expect(stat.mode & 0o777).toBe(0o000)
-        expect(stat.size).toBe(Buffer.byteLength('partial'))
+        await expect(fixture.fs.stat(join(fixture.vetted, 'output.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await fixture.fs.readdir(fixture.vetted)).toEqual([])
     })
 })

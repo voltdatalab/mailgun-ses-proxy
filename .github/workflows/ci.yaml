@@ -35,6 +35,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:run
       - run: npm run build
+      - run: npm run test:retention-link-helper
       - run: npm audit --omit=dev --audit-level=high
       - run: npm audit --audit-level=high
 
@@ -52,6 +53,7 @@ jobs:
       - run: bun run typecheck
       - run: bun run test:run
       - run: bun run build
+      - run: bun scripts/test-newsletter-retention-link-helper.mjs
 
   mysql:
     runs-on: ubuntu-latest
