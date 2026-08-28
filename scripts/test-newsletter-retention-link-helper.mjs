@@ -8,7 +8,15 @@ const { writeNewsletterRetentionJsonFileExclusive } = await import(
     '../dist/service/newsletter-retention-cli.js'
 )
 
-const directory = await mkdtemp(join(tmpdir(), 'newsletter-retention-link-helper-'))
+if (process.env.NEWSLETTER_RETENTION_REQUIRE_IMAGE_HELPER === '1') {
+    const helper = await stat('/usr/local/libexec/newsletter-retention-linkat')
+    if (!helper.isFile() || helper.uid !== 0 || helper.gid !== 0 || (helper.mode & 0o777) !== 0o755) {
+        throw new Error('production link helper has unsafe image metadata')
+    }
+}
+
+const testRoot = process.env.NEWSLETTER_RETENTION_LINK_HELPER_TEST_ROOT || tmpdir()
+const directory = await mkdtemp(join(testRoot, 'newsletter-retention-link-helper-'))
 const output = join(directory, 'artifact.json')
 
 try {

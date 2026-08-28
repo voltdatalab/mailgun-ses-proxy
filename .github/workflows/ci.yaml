@@ -36,6 +36,20 @@ jobs:
       - run: npm run test:run
       - run: npm run build
       - run: npm run test:retention-link-helper
+      - run: docker build --tag mailgun-ses-proxy-ci .
+      - name: Smoke-test final production image
+        run: |
+          evidence_root="$RUNNER_TEMP/newsletter-retention-link-helper"
+          mkdir -p "$evidence_root"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --entrypoint bun \
+            --env NEWSLETTER_RETENTION_REQUIRE_IMAGE_HELPER=1 \
+            --env NEWSLETTER_RETENTION_LINK_HELPER_TEST_ROOT=/evidence \
+            --env DATABASE_URL=mysql://localhost:3306/dummy \
+            --volume "$evidence_root:/evidence" \
+            mailgun-ses-proxy-ci \
+            scripts/test-newsletter-retention-link-helper.mjs
       - run: npm audit --omit=dev --audit-level=high
       - run: npm audit --audit-level=high
 
