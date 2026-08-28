@@ -36,7 +36,7 @@ jobs:
       - run: npm run test:run
       - run: npm run build
       - run: npm run test:retention-link-helper
-      - run: docker build --tag mailgun-ses-proxy-ci .
+      - run: docker build --file dockerfile --tag mailgun-ses-proxy-ci .
       - name: Smoke-test final production image
         run: |
           evidence_root="$RUNNER_TEMP/newsletter-retention-link-helper"
