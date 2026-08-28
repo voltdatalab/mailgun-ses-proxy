@@ -248,7 +248,6 @@ class NewsletterRetentionEscrowAccumulatorState implements NewsletterRetentionEs
         }
 
         this.totalBytes = addSafeInteger(this.totalBytes, byteLength + 1, this.totalBytesLimit, 'escrow byte budget exceeded')
-        this.totalRecords = addSafeInteger(this.totalRecords, 1, this.recordLimit, 'escrow record limit exceeded')
 
         const parsed = parseEscrowLine(text)
         if (isHeaderLine(parsed)) {
@@ -272,6 +271,7 @@ class NewsletterRetentionEscrowAccumulatorState implements NewsletterRetentionEs
             return result
         }
 
+        this.totalRecords = addSafeInteger(this.totalRecords, 1, this.recordLimit, 'escrow record limit exceeded')
         const canonical = serializeNewsletterRetentionEscrowRecord(parsed)
         if (text !== canonical) {
             throw new Error('escrow line must use canonical encoding')

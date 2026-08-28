@@ -403,10 +403,24 @@ describe('service/newsletter-retention-escrow', () => {
         oversizedTotal.consume(headerLine)
         expect(() => oversizedTotal.consume(batchLine)).toThrow('escrow byte budget exceeded')
 
-        const oversizedRecords = createNewsletterRetentionEscrowAccumulator({ recordLimit: 2 })
+        const oversizedRecords = createNewsletterRetentionEscrowAccumulator({ recordLimit: 1 })
         oversizedRecords.consume(headerLine)
         oversizedRecords.consume(batchLine)
         expect(() => oversizedRecords.consume(serializeNewsletterRetentionEscrowRecord(BATCH_1))).toThrow('escrow record limit exceeded')
+
+        const structuralLinesDoNotConsumeRecordBudget = createNewsletterRetentionEscrowAccumulator({ recordLimit: 1 })
+        structuralLinesDoNotConsumeRecordBudget.consume(headerLine)
+        structuralLinesDoNotConsumeRecordBudget.consume(serializeNewsletterRetentionEscrowFooter({
+            kind: 'footer',
+            counts: { batches: 0, messages: 0, errors: 0, notifications: 0 },
+            contentHash: canonicalContentHash([headerLine]),
+        }))
+        expect(structuralLinesDoNotConsumeRecordBudget.finalize().counts).toEqual({
+            batches: 0,
+            messages: 0,
+            errors: 0,
+            notifications: 0,
+        })
 
         const oversizedBatches = createNewsletterRetentionEscrowAccumulator({ batchLimit: 1 })
         oversizedBatches.consume(headerLine)
