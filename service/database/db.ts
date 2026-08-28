@@ -105,7 +105,7 @@ export function saveNewsletterNotificationOrphan(event: NotificationEvent) {
     })
 }
 
-export type NewsletterOrphanReconciliationResult = "absent" | "parent_missing" | "reconciled"
+export type NewsletterOrphanReconciliationResult = "absent" | "parent_missing" | "reconciled" | "already_reconciled"
 
 /**
  * Explicit, exact-ID reconciliation for a newsletter event that was durably
@@ -121,6 +121,7 @@ export async function reconcileNewsletterNotificationOrphan(
             where: { notificationId },
         })
         if (!orphan) return "absent"
+        if (orphan.reconciledAt) return "already_reconciled"
 
         const message = await tx.newsletterMessages.findUnique({
             where: { messageId: orphan.messageId },
@@ -140,8 +141,9 @@ export async function reconcileNewsletterNotificationOrphan(
             create: data,
             update: data,
         })
-        await tx.newsletterNotificationOrphan.delete({
+        await tx.newsletterNotificationOrphan.update({
             where: { id: orphan.id },
+            data: { reconciledAt: new Date() },
         })
         return "reconciled"
     })
