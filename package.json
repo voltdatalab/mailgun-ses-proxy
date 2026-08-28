@@ -35,7 +35,7 @@
         "clsx": "^2.1.1",
         "dotenv": "^17.4.2",
         "lucide-react": "^1.16.0",
-        "mariadb": "^3.5.2",
+        "mariadb": "^3.5.3",
         "next": "^16.3.3",
         "pino": "^10.3.1",
         "prisma": "^7.10.0",
@@ -60,6 +60,7 @@
     },
     "overrides": {
         "@hono/node-server": "2.0.11",
+        "mariadb": "$mariadb",
         "deepmerge-ts": "8.0.2",
         "fast-uri": "3.1.6",
         "sharp": "0.35.3"
