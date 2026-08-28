@@ -295,6 +295,7 @@ describe('service/newsletter-retention-candidate-loader', () => {
                 messageId: {
                     in: ['message-b-1', 'message-b-2'],
                 },
+                reconciledAt: null,
             },
         })
 
@@ -594,6 +595,7 @@ describe('service/newsletter-retention-candidate-loader', () => {
                 messageId: {
                     in: ['message-id-1 ', ' message-id-2'],
                 },
+                reconciledAt: null,
             },
         })
 

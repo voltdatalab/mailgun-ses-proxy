@@ -192,6 +192,7 @@ export interface NewsletterRetentionApplyOrphanCountArgs {
         messageId: {
             in: string[]
         }
+        reconciledAt: null
     }
 }
 
@@ -369,6 +370,7 @@ async function applyNewsletterRetentionBatch(
                 messageId: {
                     in: messageIds,
                 },
+                reconciledAt: null,
             },
         })
 
@@ -446,7 +448,12 @@ async function applyNewsletterRetentionBatch(
             throw new Error('newsletterNotifications postcondition failed')
         }
 
-        if (await tx.newsletterNotificationOrphan.count({ where: { messageId: { in: messageIds } } }) !== 0) {
+        if (await tx.newsletterNotificationOrphan.count({
+            where: {
+                messageId: { in: messageIds },
+                reconciledAt: null,
+            },
+        }) !== 0) {
             throw new Error('newsletterNotificationOrphan postcondition failed')
         }
     }

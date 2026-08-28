@@ -388,6 +388,18 @@ describe('executeNewsletterRetentionApply', () => {
             take: 2,
             select: { messageId: true, _count: { select: { notificationEvents: true } } },
         })
+        expect(harness.spies.orphanCount).toHaveBeenNthCalledWith(1, {
+            where: {
+                messageId: { in: ['message-private-1'] },
+                reconciledAt: null,
+            },
+        })
+        expect(harness.spies.orphanCount).toHaveBeenNthCalledWith(2, {
+            where: {
+                messageId: { in: ['message-private-1'] },
+                reconciledAt: null,
+            },
+        })
         expect(harness.spies.batchDeleteMany).toHaveBeenCalledWith({
             where: {
                 id: DEFAULT_BATCH.recordId,

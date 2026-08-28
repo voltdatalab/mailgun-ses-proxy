@@ -77,6 +77,7 @@ export interface NewsletterRetentionCandidateLoaderOrphanCountArgs {
         messageId: {
             in: string[]
         }
+        reconciledAt: null
     }
 }
 
@@ -476,6 +477,7 @@ async function countBatchLinkedOrphans(
             messageId: {
                 in: messageIds,
             },
+            reconciledAt: null,
         },
     })
 
