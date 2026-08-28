@@ -25,7 +25,7 @@ const BATCH_ROW_KEYS = ['id', 'siteId', 'fromEmail', 'contents', 'batchId', 'cre
 const MESSAGE_ROW_KEYS = ['id', 'messageId', 'toEmail', 'newsletterBatchId', 'created', 'formatedContents', 'recipientData'] as const
 const ERROR_ROW_KEYS = ['id', 'toEmail', 'error', 'created', 'newsletterBatchId', 'messageId', 'formatedContents', 'recipientData'] as const
 const NOTIFICATION_ROW_KEYS = ['id', 'type', 'notificationId', 'messageId', 'rawEvent', 'timestamp', 'created'] as const
-const MAX_STREAM_RECORDS = NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS - 2
+const MAX_STREAM_RECORDS = NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS
 
 export interface NewsletterRetentionEscrowLoaderBatchFindFirstArgs {
     where: {

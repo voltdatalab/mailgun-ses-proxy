@@ -469,6 +469,40 @@ describe('service/newsletter-retention-escrow-loader', () => {
         expect(orphanCount).not.toHaveBeenCalled()
     })
 
+    it('admits an exact hard-cap record budget before bounded row validation', async () => {
+        const { delegate, findFirst, errorFindMany } = makeDelegate({
+            batchRowsById: {
+                'private-a': {
+                    id: 'private-a',
+                    siteId: 'tenant-a',
+                    fromEmail: 'news@example.test',
+                    contents: '',
+                    batchId: 'batch-a',
+                    created: new Date('2026-08-27T10:00:00.000Z'),
+                },
+            },
+        })
+        const candidate = {
+            siteId: 'tenant-a',
+            batchRecordId: 'private-a',
+            batchId: 'batch-a',
+            createdAt: '2026-08-27T10:00:00.000Z',
+            messageCount: 0,
+            notificationCount: 0,
+            errorCount: NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS - 1,
+            orphanCount: 0,
+            correlationComplete: true,
+        }
+
+        await expect(collectRecords(delegate, [candidate])).rejects.toThrow(
+            'newsletterErrors.findMany returned unexpected number of rows',
+        )
+        expect(findFirst).toHaveBeenCalledOnce()
+        expect(errorFindMany).toHaveBeenCalledWith(expect.objectContaining({
+            take: NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS,
+        }))
+    })
+
     it('rejects an expected total above the escrow hard record limit before querying', async () => {
         const { delegate, findFirst } = makeDelegate()
         const candidate = {
