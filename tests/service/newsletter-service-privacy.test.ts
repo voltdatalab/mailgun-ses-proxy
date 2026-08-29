@@ -37,7 +37,9 @@ vi.mock('@/lib/task-queue', () => ({
         private readonly tasks: Promise<unknown>[] = []
 
         enqueue(task: () => Promise<unknown>) {
-            this.tasks.push(task())
+            const promise = task()
+            this.tasks.push(promise)
+            return promise
         }
 
         async waitUntilFinished() {

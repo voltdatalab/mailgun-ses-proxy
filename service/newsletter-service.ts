@@ -80,14 +80,15 @@ async function processBatch(siteId: string, newsletterBatchId: string) {
     const maxConcurrent = Number(process.env.MAX_CONCURRENT) || 100
     const queue = new TaskQueue({ rateLimit, maxConcurrent })
 
-    for (const prepared of emails) {
-        queue.enqueue(
+    const taskSettlements = Promise.allSettled(
+        emails.map((prepared) => queue.enqueue(
             () => sendSingleEmail(prepared, newsletterBatchId, siteId, emailBatchId),
             emailBatchId
-        )
-    }
+        )),
+    )
 
     const results = await queue.waitUntilFinished()
+    await taskSettlements
     log.info({
         sent: results.settledCount - results.failedCount,
         failed: results.failedCount,

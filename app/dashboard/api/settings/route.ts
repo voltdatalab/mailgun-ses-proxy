@@ -5,18 +5,6 @@ import { prisma } from "@/lib/database"
 
 const log = logger.child({ module: "dashboard/api/settings" })
 
-// Settings that can be managed via the dashboard
-const MANAGED_SETTINGS = [
-    { key: "NEWSLETTER_QUEUE_URL", label: "Newsletter Queue URL", type: "text" },
-    { key: "NEWSLETTER_NOTIFICATION_QUEUE_URL", label: "Newsletter Notification Queue URL", type: "text" },
-    { key: "SYSTEM_EMAIL_NOTIFICATION", label: "System Email Notification Queue URL", type: "text" },
-    { key: "AWS_DEFAULT_REGION", label: "AWS Default Region", type: "text" },
-    { key: "AWS_NEWSLETTER_CONFIGURATION_SET_NAME", label: "Newsletter Configuration Set", type: "text" },
-    { key: "AWS_TRANSACTIONAL_CONFIGURATION_SET_NAME", label: "Transactional Configuration Set", type: "text" },
-    { key: "PERSIST_NEWSLETTER_FORMATTED_CONTENTS", label: "Persist Newsletter Formatted Contents", type: "boolean" },
-    { key: "SYSTEM_FROM_ADDRESS", label: "System From Address", type: "text" },
-] as const
-
 export async function GET() {
     try {
         const session = await getSessionFromCookies()
@@ -24,16 +12,12 @@ export async function GET() {
             return Response.json({ error: "Unauthorized" }, { status: 401 })
         }
 
-        const dbSettings = await prisma.dashboardSettings.findMany()
-        const settingsMap = new Map(dbSettings.map((s) => [s.key, s.value]))
-
-        const settings = MANAGED_SETTINGS.map((def) => ({
-            ...def,
-            value: settingsMap.get(def.key) ?? process.env[def.key] ?? "",
-            source: settingsMap.has(def.key) ? "database" as const : "environment" as const,
-        }))
-
-        return Response.json({ settings })
+        return Response.json({
+            operationalConfiguration: {
+                source: "deployment_environment",
+                dashboardOverridesEnabled: false,
+            },
+        })
     } catch (error) {
         log.error({ errorClass: errorClass(error) }, "Settings GET error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
@@ -47,37 +31,40 @@ export async function PUT(req: Request) {
             return Response.json({ error: "Unauthorized" }, { status: 401 })
         }
 
-        const body = await req.json()
-        const { settings, credentials } = body as {
-            settings?: { key: string; value: string }[]
-            credentials?: { email?: string; password?: string }
+        const body: unknown = await req.json()
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+            return Response.json({ error: "Invalid request format" }, { status: 400 })
         }
 
-        if (settings !== undefined && !Array.isArray(settings)) {
-            return Response.json({ error: "Invalid settings format" }, { status: 400 })
+        const candidate = body as Record<string, unknown>
+        if (Object.prototype.hasOwnProperty.call(candidate, "settings")) {
+            return Response.json(
+                { error: "Operational settings are managed in the deployment environment" },
+                { status: 400 },
+            )
         }
-        if (credentials) {
-            const email = credentials.email?.trim()
-            const password = credentials.password
-            if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length < 16) {
-                return Response.json({ error: "Invalid credential update" }, { status: 400 })
-            }
-            await prisma.dashboardUser.update({
-                where: { id: session.sub },
-                data: { email, password: await hashPassword(password) },
-            })
+        if (Object.keys(candidate).some((key) => key !== "credentials")) {
+            return Response.json({ error: "Invalid request format" }, { status: 400 })
         }
 
-        const validKeys: Set<string> = new Set(MANAGED_SETTINGS.map((s) => s.key))
-        const operations = (settings ?? [])
-            .filter((s) => validKeys.has(s.key))
-            .map((s) => prisma.dashboardSettings.upsert({
-                where: { key: s.key }, update: { value: s.value }, create: { key: s.key, value: s.value },
-            }))
+        const credentials = candidate.credentials
+        if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+            return Response.json({ error: "Invalid credential update" }, { status: 400 })
+        }
 
-        await Promise.all(operations)
-        log.info({ count: operations.length, credentialsUpdated: Boolean(credentials) }, "Settings updated")
-        return Response.json({ ok: true, updated: operations.length, credentialsUpdated: Boolean(credentials) })
+        const credentialInput = credentials as { email?: unknown; password?: unknown }
+        const email = typeof credentialInput.email === "string" ? credentialInput.email.trim() : ""
+        const password = credentialInput.password
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== "string" || password.length < 16) {
+            return Response.json({ error: "Invalid credential update" }, { status: 400 })
+        }
+
+        await prisma.dashboardUser.update({
+            where: { id: session.sub },
+            data: { email, password: await hashPassword(password) },
+        })
+        log.info({ credentialsUpdated: true }, "Settings updated")
+        return Response.json({ ok: true, credentialsUpdated: true })
     } catch (error) {
         log.error({ errorClass: errorClass(error) }, "Settings PUT error")
         return Response.json({ error: "Internal server error" }, { status: 500 })
