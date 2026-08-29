@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildNewsletterRetentionManifest } from '@/service/newsletter-retention'
+import { NEWSLETTER_RETENTION_ESCROW_VERSION } from '@/service/newsletter-retention-escrow'
 import {
     NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION,
     buildNewsletterRetentionApplyArtifact,
@@ -11,6 +12,7 @@ import {
 
 interface Fixture {
     manifest: ReturnType<typeof buildNewsletterRetentionManifest>
+    escrow: ReturnType<typeof createEscrowCommitment>
     records: {
         siteId: string
         batchRecordId: string
@@ -22,6 +24,26 @@ interface Fixture {
         orphanCount: number
         correlationComplete: boolean
     }[]
+}
+
+function createEscrowCommitment(manifest: ReturnType<typeof buildNewsletterRetentionManifest>) {
+    const counts = manifest.batches.reduce((total, batch) => ({
+        batches: total.batches + 1,
+        messages: total.messages + batch.messageCount,
+        errors: total.errors + batch.errorCount,
+        notifications: total.notifications + batch.notificationCount,
+    }), { batches: 0, messages: 0, errors: 0, notifications: 0 })
+
+    return {
+        version: NEWSLETTER_RETENTION_ESCROW_VERSION,
+        siteId: manifest.siteId,
+        cutoff: manifest.cutoff,
+        policyVersion: manifest.policyVersion,
+        publicManifestHash: manifest.hash,
+        schemaFingerprint: 'a'.repeat(64),
+        contentHash: 'b'.repeat(64),
+        counts,
+    }
 }
 
 function createFixture(): Fixture {
@@ -71,14 +93,15 @@ function createFixture(): Fixture {
         },
     ]
 
-    return { manifest, records }
+    return { manifest, escrow: createEscrowCommitment(manifest), records }
 }
 
 describe('service/newsletter-retention-apply', () => {
     it('parses an apply context only when policy, evidence, manifest, and artifact are bound exactly', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
         const artifact = buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records,
         })
 
@@ -117,16 +140,18 @@ describe('service/newsletter-retention-apply', () => {
     })
 
     it('builds a private apply artifact with exact index-to-ID bindings and validates its own hash', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         const artifact = buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records,
         })
 
         expect(artifact.version).toBe(NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION)
         expect(artifact.siteId).toBe('tenant-a')
         expect(artifact.publicManifestHash).toBe(manifest.hash)
+        expect(artifact.escrow).toEqual(escrow)
         expect(artifact.bindings).toEqual([
             {
                 manifestIndex: 0,
@@ -142,8 +167,36 @@ describe('service/newsletter-retention-apply', () => {
         expect(parsed).toEqual(artifact)
     })
 
+    it('rejects escrow commitment drift and binds it into the artifact hash', () => {
+        const { manifest, escrow, records } = createFixture()
+
+        for (const drifted of [
+            { ...escrow, siteId: 'tenant-b' },
+            { ...escrow, cutoff: '2026-08-27T11:59:59.999Z' },
+            { ...escrow, policyVersion: escrow.policyVersion + 1 },
+            { ...escrow, publicManifestHash: '0'.repeat(64) },
+            { ...escrow, counts: { ...escrow.counts, messages: escrow.counts.messages + 1 } },
+        ]) {
+            expect(() => buildNewsletterRetentionApplyArtifact({
+                manifest,
+                escrow: drifted,
+                records,
+            })).toThrow()
+        }
+
+        const artifact = buildNewsletterRetentionApplyArtifact({ manifest, escrow, records })
+        expect(() => parseNewsletterRetentionApplyArtifact({
+            ...artifact,
+            escrow: { ...artifact.escrow, contentHash: 'c'.repeat(64) },
+        })).toThrow('apply artifact hash mismatch')
+        expect(() => parseNewsletterRetentionApplyArtifact({
+            ...artifact,
+            version: 1,
+        })).toThrow('apply artifact version is unsupported')
+    })
+
     it('rejects cross-tenant replay by requiring matching private record tenant scope', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         const foreignRecords = records.map((record) => ({
             ...record,
@@ -152,12 +205,13 @@ describe('service/newsletter-retention-apply', () => {
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: foreignRecords,
         })).toThrow('private record tenant scope must match manifest siteId')
     })
 
     it('rejects public manifest hash mismatch and malformed public manifest order', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         const tamperedManifest = {
             ...manifest,
@@ -166,12 +220,13 @@ describe('service/newsletter-retention-apply', () => {
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest: tamperedManifest,
+            escrow,
             records,
         })).toThrow('public manifest hash mismatch')
     })
 
     it('rejects malformed public manifest batches', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         const malformedBatches: Array<unknown> = [
             null,
@@ -185,26 +240,30 @@ describe('service/newsletter-retention-apply', () => {
                     ...manifest,
                     batches,
                 } as never,
+                escrow,
                 records,
             })).toThrow('public manifest batches must be an array')
         }
     })
 
     it('rejects reordered, missing, and extra private records', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [records[1], records[0]],
         })).toThrow('private record batchId does not match public manifest')
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: records.slice(0, 1),
         })).toThrow('private record count must match manifest batch count')
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [...records, {
                 siteId: 'tenant-a',
                 batchRecordId: 'row-extra',
@@ -220,10 +279,11 @@ describe('service/newsletter-retention-apply', () => {
     })
 
     it('rejects duplicate private record IDs and whitespace-normalized private IDs', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [
                 { ...records[0], batchRecordId: 'row-dup' },
                 { ...records[1], batchRecordId: 'row-dup' },
@@ -232,6 +292,7 @@ describe('service/newsletter-retention-apply', () => {
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [
                 { ...records[0], batchRecordId: 'row-one' },
                 { ...records[1], batchRecordId: 'row-two ' },
@@ -240,10 +301,11 @@ describe('service/newsletter-retention-apply', () => {
     })
 
     it('rejects tampered private artifact hashes and binding index corruption', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         const artifact = buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records,
         })
 
@@ -265,10 +327,11 @@ describe('service/newsletter-retention-apply', () => {
     })
 
     it('rejects private records with orphans or incomplete correlation', () => {
-        const { manifest, records } = createFixture()
+        const { manifest, escrow, records } = createFixture()
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [
                 {
                     ...records[0],
@@ -280,6 +343,7 @@ describe('service/newsletter-retention-apply', () => {
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow,
             records: [
                 {
                     ...records[0],
@@ -314,6 +378,7 @@ describe('service/newsletter-retention-apply', () => {
 
         expect(() => buildNewsletterRetentionApplyArtifact({
             manifest,
+            escrow: createEscrowCommitment(manifest),
             records: [
                 {
                     siteId: 'tenant-a',
@@ -375,7 +440,7 @@ describe('service/newsletter-retention-apply', () => {
             },
         ]
 
-        expect(buildNewsletterRetentionApplyArtifact({ manifest, records }).bindings).toEqual([
+        expect(buildNewsletterRetentionApplyArtifact({ manifest, escrow: createEscrowCommitment(manifest), records }).bindings).toEqual([
             { manifestIndex: 0, batchRecordId: 'row-earlier' },
             { manifestIndex: 1, batchRecordId: 'row-later' },
         ])

@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { prisma } from '../lib/database.js'
+import { resolveNewsletterRetentionSchemaPath } from '../service/newsletter-retention-schema-path.js'
 import {
     executeNewsletterRetentionCli,
     NewsletterRetentionCliError,
+    openVerifiedNewsletterRetentionEscrowSource,
     readNewsletterRetentionJsonFile,
+    writeNewsletterRetentionEscrowFileExclusive,
     writeNewsletterRetentionJsonFileExclusive,
     type NewsletterRetentionCliDatabase,
 } from '../service/newsletter-retention-cli.js'
@@ -14,10 +19,14 @@ import {
 
 async function main(): Promise<void> {
     const database = getNewsletterRetentionApplyDatabase() as NewsletterRetentionCliDatabase
+    const schemaPath = resolveNewsletterRetentionSchemaPath(import.meta.url)
     const output = await executeNewsletterRetentionCli(process.argv.slice(2), {
         database,
         createLockProvider: () => createNewsletterRetentionMariaDbLockProvider(),
         now: () => new Date(),
+        schemaFingerprint: async () => createHash('sha256').update(await readFile(schemaPath)).digest('hex'),
+        writeEscrowFileExclusive: writeNewsletterRetentionEscrowFileExclusive,
+        openVerifiedEscrowSource: openVerifiedNewsletterRetentionEscrowSource,
         readJsonFile: readNewsletterRetentionJsonFile,
         writeJsonFileExclusive: writeNewsletterRetentionJsonFileExclusive,
     })

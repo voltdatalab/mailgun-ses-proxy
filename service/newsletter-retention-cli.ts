@@ -19,14 +19,29 @@ import {
 import { buildNewsletterRetentionSelectionPlan } from './newsletter-retention-plan.js'
 import {
     buildNewsletterRetentionApplyArtifact,
-    type NewsletterRetentionApplyArtifact,
+    parseNewsletterRetentionApplyArtifact,
 } from './newsletter-retention-apply.js'
+import {
+    buildNewsletterRetentionEscrowDryRunResult,
+    type NewsletterRetentionEscrowDryRunResult,
+} from './newsletter-retention-coordinator.js'
+import type { NewsletterRetentionEscrowLoaderDelegate } from './newsletter-retention-escrow-loader.js'
+import {
+    NEWSLETTER_RETENTION_ESCROW_MAX_LINE_BYTES,
+    NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS,
+    NEWSLETTER_RETENTION_ESCROW_MAX_TOTAL_BYTES,
+    createNewsletterRetentionEscrowAccumulator,
+    parseNewsletterRetentionEscrowRecord,
+    parseNewsletterRetentionEscrowVerificationResult,
+    type NewsletterRetentionEscrowRecord,
+} from './newsletter-retention-escrow.js'
 import {
     NEWSLETTER_RETENTION_APPLY_LOCK_KEY,
     executeNewsletterRetentionApply,
     type NewsletterRetentionApplyDatabase,
     type NewsletterRetentionApplyLockProvider,
     type NewsletterRetentionApplyReceipt,
+    type NewsletterRetentionVerifiedEscrowSource,
 } from './newsletter-retention-applier.js'
 
 const MAX_JSON_FILE_BYTES = 1_048_576
@@ -41,12 +56,24 @@ const LINK_HELPER_PATHS = [
     resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/newsletter-retention-linkat'),
 ]
 
-export type NewsletterRetentionCliDatabase = NewsletterRetentionCandidateLoaderDelegate & NewsletterRetentionApplyDatabase
+export type NewsletterRetentionCliDatabase = NewsletterRetentionCandidateLoaderDelegate
+    & NewsletterRetentionEscrowLoaderDelegate
+    & NewsletterRetentionApplyDatabase
+
+export interface NewsletterRetentionClosableEscrowSource extends NewsletterRetentionVerifiedEscrowSource {
+    close(): void | Promise<void>
+}
 
 export interface NewsletterRetentionCliDependencies {
     database: NewsletterRetentionCliDatabase
     createLockProvider(): NewsletterRetentionApplyLockProvider
     now(): Date
+    schemaFingerprint(): string | Promise<string>
+    writeEscrowFileExclusive(
+        path: string,
+        producer: (writeChunk: (chunk: Uint8Array) => Promise<void>) => Promise<NewsletterRetentionEscrowDryRunResult>,
+    ): Promise<NewsletterRetentionEscrowDryRunResult>
+    openVerifiedEscrowSource(path: string): Promise<NewsletterRetentionClosableEscrowSource>
     readJsonFile(path: string, privacy: 'public' | 'private'): Promise<unknown>
     writeJsonFileExclusive(path: string, value: unknown, mode: 0o600 | 0o644): Promise<void>
 }
@@ -64,6 +91,11 @@ export interface NewsletterRetentionCliDryRunOutput {
         errorCount: number
     }
     manifest: NewsletterRetentionManifest
+    escrow: {
+        written: boolean
+        contentHash: string | null
+        schemaFingerprint: string | null
+    }
     privateArtifact: {
         written: boolean
         hash: string | null
@@ -87,10 +119,13 @@ interface ParsedCliOptions {
     evidenceFile: string
     manifestOut?: string
     privateArtifactOut?: string
+    escrowOut?: string
     manifestFile?: string
     privateArtifactFile?: string
+    escrowFile?: string
     expectedManifestHash?: string
     expectedArtifactHash?: string
+    expectedEscrowContentHash?: string
     confirmSiteId?: string
 }
 
@@ -202,6 +237,234 @@ export async function writeNewsletterRetentionJsonFileExclusive(
     } finally {
         await handle?.close().catch(() => undefined)
         await parent?.handle.close().catch(() => undefined)
+    }
+}
+
+export async function writeNewsletterRetentionEscrowFileExclusive(
+    path: string,
+    producer: (writeChunk: (chunk: Uint8Array) => Promise<void>) => Promise<NewsletterRetentionEscrowDryRunResult>,
+): Promise<NewsletterRetentionEscrowDryRunResult> {
+    const normalizedPath = normalizeAbsolutePath(path, 'output file')
+    let handle: Awaited<ReturnType<typeof open>> | null = null
+    let parent: BoundParentDirectory | null = null
+
+    try {
+        parent = await openBoundParentDirectory(normalizedPath)
+        handle = await open(
+            `/proc/self/fd/${parent.handle.fd}`,
+            constants.O_WRONLY | LINUX_O_TMPFILE,
+            0o000,
+        )
+        const result = await producer(async (chunk) => {
+            await handle!.writeFile(chunk)
+        })
+        await handle.sync()
+        await handle.chmod(0o400)
+        await handle.sync()
+        const publication = await publishNewsletterRetentionOutput(handle, parent)
+        if (publication !== 'published') {
+            throw new Error('escrow output path already exists')
+        }
+        await parent.handle.sync()
+        return result
+    } catch {
+        throw new NewsletterRetentionCliError('newsletter retention escrow output file could not be created')
+    } finally {
+        await handle?.close().catch(() => undefined)
+        await parent?.handle.close().catch(() => undefined)
+    }
+}
+
+export async function openVerifiedNewsletterRetentionEscrowSource(
+    path: string,
+): Promise<NewsletterRetentionClosableEscrowSource> {
+    const normalizedPath = normalizeAbsolutePath(path, 'escrow file')
+    let parent: BoundParentDirectory | null = null
+    let handle: Awaited<ReturnType<typeof open>> | null = null
+
+    try {
+        parent = await openBoundParentDirectory(normalizedPath)
+        handle = await open(
+            parent.boundFilePath,
+            constants.O_RDONLY | constants.O_NOFOLLOW,
+        )
+        const identity = await readEscrowFileIdentity(handle)
+        const accumulator = createNewsletterRetentionEscrowAccumulator()
+        for await (const line of iterateEscrowFileLines(handle)) {
+            accumulator.consume(line)
+        }
+        const verification = accumulator.finalize()
+        await assertEscrowFileIdentity(handle, identity)
+
+        const recordIterator = iterateVerifiedEscrowRecords(handle)[Symbol.asyncIterator]()
+        let nextManifestIndex = 0
+        let pending: NewsletterRetentionEscrowRecord | null = null
+        let closed = false
+        const boundHandle = handle
+        const boundParent = parent
+        handle = null
+        parent = null
+
+        return {
+            verification,
+            async readBatchRecords({ manifestIndex }) {
+                if (closed || manifestIndex !== nextManifestIndex) {
+                    throw new Error('verified escrow source access is out of sequence')
+                }
+                await assertEscrowFileIdentity(boundHandle, identity)
+                const records: NewsletterRetentionEscrowRecord[] = []
+                let current = pending
+                pending = null
+
+                while (true) {
+                    if (!current) {
+                        const item = await recordIterator.next()
+                        if (item.done) break
+                        current = item.value
+                    }
+                    if (current.manifestIndex < manifestIndex) {
+                        throw new Error('verified escrow source record order is invalid')
+                    }
+                    if (current.manifestIndex > manifestIndex) {
+                        pending = current
+                        break
+                    }
+                    records.push(current)
+                    current = null
+                }
+
+                nextManifestIndex += 1
+                await assertEscrowFileIdentity(boundHandle, identity)
+                return records
+            },
+            async close() {
+                if (closed) return
+                closed = true
+                await recordIterator.return?.(undefined)
+                await boundHandle.close()
+                await boundParent.handle.close()
+            },
+        }
+    } catch {
+        await handle?.close().catch(() => undefined)
+        await parent?.handle.close().catch(() => undefined)
+        throw new NewsletterRetentionCliError('newsletter retention escrow source is invalid')
+    }
+}
+
+interface EscrowFileIdentity {
+    dev: string
+    ino: string
+    size: number
+    mtimeMs: number
+    ctimeMs: number
+}
+
+async function readEscrowFileIdentity(
+    handle: Awaited<ReturnType<typeof open>>,
+): Promise<EscrowFileIdentity> {
+    const stat = await handle.stat()
+    const hardFileBytes = NEWSLETTER_RETENTION_ESCROW_MAX_TOTAL_BYTES + NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS + 2
+    if (
+        !stat.isFile()
+        || stat.nlink !== 1
+        || stat.uid !== process.getuid?.()
+        || (stat.mode & 0o777) !== 0o400
+        || !Number.isSafeInteger(stat.size)
+        || stat.size <= 0
+        || stat.size > hardFileBytes
+    ) {
+        throw new Error('escrow file metadata is invalid')
+    }
+    return {
+        dev: String(stat.dev),
+        ino: String(stat.ino),
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+    }
+}
+
+async function assertEscrowFileIdentity(
+    handle: Awaited<ReturnType<typeof open>>,
+    expected: EscrowFileIdentity,
+): Promise<void> {
+    const actual = await readEscrowFileIdentity(handle)
+    if (
+        actual.dev !== expected.dev
+        || actual.ino !== expected.ino
+        || actual.size !== expected.size
+        || actual.mtimeMs !== expected.mtimeMs
+        || actual.ctimeMs !== expected.ctimeMs
+    ) {
+        throw new Error('escrow file identity changed')
+    }
+}
+
+async function* iterateVerifiedEscrowRecords(
+    handle: Awaited<ReturnType<typeof open>>,
+): AsyncGenerator<NewsletterRetentionEscrowRecord> {
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    let sawHeader = false
+    let sawFooter = false
+    for await (const line of iterateEscrowFileLines(handle)) {
+        const value = JSON.parse(decoder.decode(line)) as unknown
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            throw new Error('escrow line is invalid')
+        }
+        const kind = (value as Record<string, unknown>).kind
+        if (kind === 'header') {
+            if (sawHeader || sawFooter) throw new Error('escrow header order is invalid')
+            sawHeader = true
+            continue
+        }
+        if (kind === 'footer') {
+            if (!sawHeader || sawFooter) throw new Error('escrow footer order is invalid')
+            sawFooter = true
+            continue
+        }
+        if (!sawHeader || sawFooter) throw new Error('escrow record order is invalid')
+        yield parseNewsletterRetentionEscrowRecord(value)
+    }
+    if (!sawHeader || !sawFooter) throw new Error('escrow framing is incomplete')
+}
+
+async function* iterateEscrowFileLines(
+    handle: Awaited<ReturnType<typeof open>>,
+): AsyncGenerator<Uint8Array> {
+    const chunk = Buffer.allocUnsafe(65_536)
+    let pending = Buffer.alloc(0)
+    let position = 0
+    let totalBytes = 0
+
+    while (true) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, position)
+        if (bytesRead === 0) break
+        position += bytesRead
+        totalBytes += bytesRead
+        if (totalBytes > NEWSLETTER_RETENTION_ESCROW_MAX_TOTAL_BYTES + NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS + 2) {
+            throw new Error('escrow file exceeds byte limit')
+        }
+        const combined = pending.length === 0
+            ? Buffer.from(chunk.subarray(0, bytesRead))
+            : Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+        let start = 0
+        for (let index = 0; index < combined.length; index += 1) {
+            if (combined[index] !== 0x0a) continue
+            const line = combined.subarray(start, index)
+            if (line.length > NEWSLETTER_RETENTION_ESCROW_MAX_LINE_BYTES) {
+                throw new Error('escrow line exceeds byte limit')
+            }
+            yield line
+            start = index + 1
+        }
+        pending = Buffer.from(combined.subarray(start))
+        if (pending.length > NEWSLETTER_RETENTION_ESCROW_MAX_LINE_BYTES) {
+            throw new Error('escrow line exceeds byte limit')
+        }
+    }
+    if (pending.length !== 0) {
+        throw new Error('escrow file must end with newline')
     }
 }
 
@@ -357,14 +620,32 @@ async function executeDryRun(
         orphanCount: record.orphanCount,
         correlationComplete: record.correlationComplete,
     }))
-    const plan = buildNewsletterRetentionSelectionPlan({
+    let coordinated: NewsletterRetentionEscrowDryRunResult | null = null
+    if (options.escrowOut) {
+        const schemaFingerprint = await Promise.resolve(dependencies.schemaFingerprint())
+        coordinated = await dependencies.writeEscrowFileExclusive(
+            options.escrowOut,
+            async (writeChunk) => buildNewsletterRetentionEscrowDryRunResult({
+                policy,
+                evidence,
+                queueHealthy: evidence.health.queueHealthy,
+                dlqHealthy: true,
+                candidates: records,
+                delegate: dependencies.database,
+                schemaFingerprint,
+                writeChunk,
+            }),
+        )
+    }
+
+    const plan = coordinated?.plan ?? buildNewsletterRetentionSelectionPlan({
         policy,
         evidence,
         queueHealthy: evidence.health.queueHealthy,
         dlqHealthy: true,
         candidates,
     })
-    const manifest = buildNewsletterRetentionManifest({
+    const manifest = coordinated?.manifest ?? buildNewsletterRetentionManifest({
         siteId: policy.siteId,
         cutoff: policy.cutoff,
         policyVersion: policy.policyVersion,
@@ -376,11 +657,10 @@ async function executeDryRun(
             errorCount: batch.errorCount,
         })),
     })
-
-    let artifact: NewsletterRetentionApplyArtifact | null = null
-    if (options.privateArtifactOut) {
-        artifact = buildNewsletterRetentionApplyArtifact({ manifest, records })
-    }
+    const escrow = coordinated?.escrow ?? null
+    const artifact = options.privateArtifactOut && escrow
+        ? buildNewsletterRetentionApplyArtifact({ manifest, escrow, records })
+        : null
 
     if (options.privateArtifactOut && artifact) {
         await dependencies.writeJsonFileExclusive(options.privateArtifactOut, artifact, 0o600)
@@ -398,6 +678,11 @@ async function executeDryRun(
         batchCount: plan.batchCount,
         totals: plan.totals,
         manifest,
+        escrow: {
+            written: escrow !== null,
+            contentHash: escrow?.contentHash ?? null,
+            schemaFingerprint: escrow?.schemaFingerprint ?? null,
+        },
         privateArtifact: {
             written: artifact !== null,
             hash: artifact?.hash ?? null,
@@ -412,28 +697,61 @@ async function executeApply(
     dependencies: NewsletterRetentionCliDependencies,
 ): Promise<NewsletterRetentionCliApplyOutput> {
     const manifest = await dependencies.readJsonFile(options.manifestFile!, 'public')
-    const artifact = await dependencies.readJsonFile(options.privateArtifactFile!, 'private')
+    const rawArtifact = await dependencies.readJsonFile(options.privateArtifactFile!, 'private')
     const manifestHash = readExpectedObjectHash(manifest, 'manifest')
-    const artifactHash = readExpectedObjectHash(artifact, 'artifact')
+    const artifactHash = readExpectedObjectHash(rawArtifact, 'artifact')
 
     if (manifestHash !== options.expectedManifestHash || artifactHash !== options.expectedArtifactHash) {
         throw new NewsletterRetentionCliError('newsletter retention expected hash confirmation failed')
     }
 
-    const receipt = await executeNewsletterRetentionApply({
-        policy: {
-            siteId: policy.siteId,
-            cutoff: policy.cutoff,
-            apply: true,
-            maxBatches: policy.maxBatches,
-            maxMessages: policy.maxMessages,
-        },
-        evidence,
-        manifest,
-        artifact,
-        lock: dependencies.createLockProvider(),
-        database: dependencies.database,
-    })
+    let artifact: ReturnType<typeof parseNewsletterRetentionApplyArtifact>
+    try {
+        artifact = parseNewsletterRetentionApplyArtifact(rawArtifact)
+    } catch {
+        throw new NewsletterRetentionCliError('newsletter retention private artifact is invalid')
+    }
+    if (artifact.escrow.contentHash !== options.expectedEscrowContentHash) {
+        throw new NewsletterRetentionCliError('newsletter retention escrow content hash confirmation failed')
+    }
+
+    let source: NewsletterRetentionClosableEscrowSource | null = null
+    let receipt: NewsletterRetentionApplyReceipt | null = null
+    let operationError: unknown
+    try {
+        source = await dependencies.openVerifiedEscrowSource(options.escrowFile!)
+        const verification = parseNewsletterRetentionEscrowVerificationResult(source.verification)
+        if (verification.contentHash !== options.expectedEscrowContentHash) {
+            throw new NewsletterRetentionCliError('newsletter retention verified escrow hash mismatch')
+        }
+        receipt = await executeNewsletterRetentionApply({
+            policy: {
+                siteId: policy.siteId,
+                cutoff: policy.cutoff,
+                apply: true,
+                maxBatches: policy.maxBatches,
+                maxMessages: policy.maxMessages,
+            },
+            evidence,
+            manifest,
+            artifact,
+            escrowSource: source,
+            lock: dependencies.createLockProvider(),
+            database: dependencies.database,
+        })
+    } catch (error) {
+        operationError = error
+    } finally {
+        try {
+            await source?.close()
+        } catch {
+            if (!operationError) {
+                operationError = new NewsletterRetentionCliError('newsletter retention escrow source close failed')
+            }
+        }
+    }
+    if (operationError) throw operationError
+    if (!receipt) throw new NewsletterRetentionCliError('newsletter retention apply failed')
 
     return {
         mode: 'apply',
@@ -457,10 +775,13 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
         '--evidence-file',
         '--manifest-out',
         '--private-artifact-out',
+        '--escrow-out',
         '--manifest-file',
         '--private-artifact-file',
+        '--escrow-file',
         '--expected-manifest-hash',
         '--expected-artifact-hash',
+        '--expected-escrow-content-hash',
         '--confirm-site-id',
     ])
 
@@ -498,10 +819,13 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
         maxMessages: optionalPositiveIntegerFlag(flags, '--max-messages'),
         manifestOut: optionalAbsolutePathFlag(flags, '--manifest-out'),
         privateArtifactOut: optionalAbsolutePathFlag(flags, '--private-artifact-out'),
+        escrowOut: optionalAbsolutePathFlag(flags, '--escrow-out'),
         manifestFile: optionalAbsolutePathFlag(flags, '--manifest-file'),
         privateArtifactFile: optionalAbsolutePathFlag(flags, '--private-artifact-file'),
+        escrowFile: optionalAbsolutePathFlag(flags, '--escrow-file'),
         expectedManifestHash: optionalHashFlag(flags, '--expected-manifest-hash'),
         expectedArtifactHash: optionalHashFlag(flags, '--expected-artifact-hash'),
+        expectedEscrowContentHash: optionalHashFlag(flags, '--expected-escrow-content-hash'),
         confirmSiteId: optionalStringFlag(flags, '--confirm-site-id'),
     }
 
@@ -514,32 +838,41 @@ function validateModeSpecificOptions(options: ParsedCliOptions): void {
         if (
             options.manifestFile
             || options.privateArtifactFile
+            || options.escrowFile
             || options.expectedManifestHash
             || options.expectedArtifactHash
+            || options.expectedEscrowContentHash
             || options.confirmSiteId
         ) {
             throw new NewsletterRetentionCliError('apply-only arguments require --apply')
         }
-        ensureDistinctPaths([options.evidenceFile, options.manifestOut, options.privateArtifactOut])
+        if (options.privateArtifactOut && !options.escrowOut) {
+            throw new NewsletterRetentionCliError('private artifact output requires escrow output')
+        }
+        ensureDistinctPaths([options.evidenceFile, options.manifestOut, options.privateArtifactOut, options.escrowOut])
         return
     }
 
-    if (options.manifestOut || options.privateArtifactOut) {
+    if (options.manifestOut || options.privateArtifactOut || options.escrowOut) {
         throw new NewsletterRetentionCliError('dry-run output arguments cannot be used with --apply')
     }
     if (
         !options.manifestFile
         || !options.privateArtifactFile
+        || !options.escrowFile
         || !options.expectedManifestHash
         || !options.expectedArtifactHash
+        || !options.expectedEscrowContentHash
         || !options.confirmSiteId
     ) {
-        throw new NewsletterRetentionCliError('apply requires manifest, private artifact, expected hashes, and tenant confirmation')
+        throw new NewsletterRetentionCliError(
+            'apply requires manifest, private artifact, escrow, expected hashes, and tenant confirmation',
+        )
     }
     if (options.confirmSiteId !== options.siteId) {
         throw new NewsletterRetentionCliError('apply tenant confirmation does not match siteId')
     }
-    ensureDistinctPaths([options.evidenceFile, options.manifestFile, options.privateArtifactFile])
+    ensureDistinctPaths([options.evidenceFile, options.manifestFile, options.privateArtifactFile, options.escrowFile])
 }
 
 function parseCliEvidence(value: unknown, now: string): NewsletterRetentionEvidence {

@@ -12,9 +12,13 @@ import {
     parseNewsletterRetentionEvidence,
     parseNewsletterRetentionPolicy,
 } from './newsletter-retention.js'
+import {
+    parseNewsletterRetentionEscrowVerificationResult,
+    type NewsletterRetentionEscrowVerificationResult,
+} from './newsletter-retention-escrow.js'
 import type { NewsletterRetentionCandidateLoaderRecord } from './newsletter-retention-candidate-loader.js'
 
-export const NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION = 1 as const
+export const NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION = 2 as const
 const UTC_ISO_8601_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 export interface NewsletterRetentionManifestApplyBinding {
@@ -26,12 +30,14 @@ export interface NewsletterRetentionApplyArtifact {
     version: number
     siteId: string
     publicManifestHash: string
+    escrow: NewsletterRetentionEscrowVerificationResult
     bindings: NewsletterRetentionManifestApplyBinding[]
     hash: string
 }
 
 export interface NewsletterRetentionApplyArtifactInput {
     manifest: NewsletterRetentionManifest
+    escrow: NewsletterRetentionEscrowVerificationResult
     records: ReadonlyArray<NewsletterRetentionCandidateLoaderRecord>
 }
 
@@ -57,6 +63,8 @@ export function buildNewsletterRetentionApplyArtifact(input: NewsletterRetention
     const context = normalizeApplyArtifactInput(input)
 
     const canonicalManifest = normalizeManifestForApply(context.manifest)
+    const escrow = parseNewsletterRetentionEscrowVerificationResult(context.escrow)
+    assertEscrowMatchesManifest(escrow, canonicalManifest)
 
     const cutoffMs = parseStrictUtcIsoMs(canonicalManifest.cutoff, 'canonical manifest cutoff')
     if (context.records.length === 0) {
@@ -130,6 +138,7 @@ export function buildNewsletterRetentionApplyArtifact(input: NewsletterRetention
         version: NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION,
         siteId: canonicalManifest.siteId,
         publicManifestHash: canonicalManifest.hash,
+        escrow,
         bindings,
     } as const
 
@@ -145,6 +154,7 @@ export function parseNewsletterRetentionApplyArtifact(input: unknown): Newslette
         version: normalized.version,
         siteId: normalized.siteId,
         publicManifestHash: normalized.publicManifestHash,
+        escrow: normalized.escrow,
         bindings: normalized.bindings,
     })
 
@@ -187,6 +197,7 @@ export function parseNewsletterRetentionApplyContext(input: NewsletterRetentionA
     if (artifact.publicManifestHash !== manifest.hash) {
         throw new Error('apply artifact manifest hash must match canonical manifest hash')
     }
+    assertEscrowMatchesManifest(artifact.escrow, manifest)
 
     if (artifact.bindings.length === 0) {
         throw new Error('apply artifact bindings must be non-empty')
@@ -217,8 +228,46 @@ export function parseNewsletterRetentionApplyContext(input: NewsletterRetentionA
     }
 }
 
+function assertEscrowMatchesManifest(
+    escrow: NewsletterRetentionEscrowVerificationResult,
+    manifest: NewsletterRetentionManifest,
+): void {
+    if (escrow.siteId !== manifest.siteId) {
+        throw new Error('escrow siteId must match manifest siteId')
+    }
+    if (escrow.cutoff !== manifest.cutoff) {
+        throw new Error('escrow cutoff must match manifest cutoff')
+    }
+    if (escrow.policyVersion !== manifest.policyVersion) {
+        throw new Error('escrow policyVersion must match manifest policyVersion')
+    }
+    if (escrow.publicManifestHash !== manifest.hash) {
+        throw new Error('escrow publicManifestHash must match canonical manifest hash')
+    }
+
+    const expectedCounts = manifest.batches.reduce(
+        (counts, batch) => ({
+            batches: safeAddIntegers(counts.batches, 1, 'manifest escrow batch count'),
+            messages: safeAddIntegers(counts.messages, batch.messageCount, 'manifest escrow message count'),
+            errors: safeAddIntegers(counts.errors, batch.errorCount, 'manifest escrow error count'),
+            notifications: safeAddIntegers(counts.notifications, batch.notificationCount, 'manifest escrow notification count'),
+        }),
+        { batches: 0, messages: 0, errors: 0, notifications: 0 },
+    )
+
+    if (
+        escrow.counts.batches !== expectedCounts.batches
+        || escrow.counts.messages !== expectedCounts.messages
+        || escrow.counts.errors !== expectedCounts.errors
+        || escrow.counts.notifications !== expectedCounts.notifications
+    ) {
+        throw new Error('escrow counts must exactly match canonical manifest totals')
+    }
+}
+
 function normalizeApplyArtifactInput(input: NewsletterRetentionApplyArtifactInput): {
     manifest: unknown
+    escrow: unknown
     records: NewsletterRetentionCandidateLoaderRecord[]
 } {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -227,6 +276,7 @@ function normalizeApplyArtifactInput(input: NewsletterRetentionApplyArtifactInpu
 
     return {
         manifest: (input as { manifest?: unknown }).manifest,
+        escrow: (input as { escrow?: unknown }).escrow,
         records: normalizePrivateRecords((input as { records?: unknown }).records),
     }
 }
@@ -239,6 +289,7 @@ function normalizeApplyArtifact(input: unknown): NewsletterRetentionApplyArtifac
     const version = normalizeApplyArtifactVersion((input as { version?: unknown }).version)
     const siteId = normalizeApplyArtifactSiteId((input as { siteId?: unknown }).siteId)
     const publicManifestHash = normalizeApplyArtifactManifestHash((input as { publicManifestHash?: unknown }).publicManifestHash)
+    const escrow = parseNewsletterRetentionEscrowVerificationResult((input as { escrow?: unknown }).escrow)
     const bindings = normalizeApplyArtifactBindings((input as { bindings?: unknown }).bindings)
     const hash = normalizeApplyArtifactHash((input as { hash?: unknown }).hash)
 
@@ -246,6 +297,7 @@ function normalizeApplyArtifact(input: unknown): NewsletterRetentionApplyArtifac
         version,
         siteId,
         publicManifestHash,
+        escrow,
         bindings,
         hash,
     }

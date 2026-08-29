@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 
 import { buildNewsletterRetentionManifest } from '@/service/newsletter-retention'
+import { NEWSLETTER_RETENTION_ESCROW_VERSION } from '@/service/newsletter-retention-escrow'
 import {
     NEWSLETTER_RETENTION_APPLY_ARTIFACT_VERSION,
     buildNewsletterRetentionApplyArtifact,
@@ -29,6 +30,8 @@ interface BatchFixture {
 interface HarnessOverrides {
     parent?: unknown
     messages?: unknown
+    errors?: unknown
+    notifications?: unknown
     orphanCounts?: unknown[]
     notificationDelete?: unknown
     errorDelete?: unknown
@@ -53,6 +56,74 @@ const DEFAULT_BATCH: BatchFixture = {
     messageCount: 1,
     notificationCount: 2,
     errorCount: 1,
+}
+
+function buildPersistedRows(batch: BatchFixture) {
+    const messages = Array.from({ length: batch.messageCount }, (_, index) => ({
+        id: `${batch.recordId}-message-row-${index + 1}`,
+        messageId: `${batch.recordId}-message-id-${index + 1}`,
+        toEmail: `recipient-${index + 1}@example.invalid`,
+        newsletterBatchId: batch.recordId,
+        created: new Date(batch.createdAt),
+        formatedContents: `message-content-${index + 1}`,
+        recipientData: null,
+    }))
+    const errors = Array.from({ length: batch.errorCount }, (_, index) => ({
+        id: `${batch.recordId}-error-row-${index + 1}`,
+        toEmail: `error-recipient-${index + 1}@example.invalid`,
+        error: `error-payload-${index + 1}`,
+        created: new Date(batch.createdAt),
+        newsletterBatchId: batch.recordId,
+        messageId: `${batch.recordId}-error-message-id-${index + 1}`,
+        formatedContents: `error-content-${index + 1}`,
+        recipientData: null,
+    }))
+    const notifications = batch.notificationCount <= 1_000
+        ? Array.from({ length: batch.notificationCount }, (_, index) => ({
+            id: `${batch.recordId}-notification-row-${index + 1}`,
+            type: 'delivered',
+            notificationId: `${batch.recordId}-notification-id-${index + 1}`,
+            messageId: messages[index % messages.length]?.messageId ?? 'invalid-no-message',
+            rawEvent: `notification-payload-${index + 1}`,
+            timestamp: new Date(batch.createdAt),
+            created: new Date(batch.createdAt),
+        }))
+        : []
+    return {
+        parent: {
+            id: batch.recordId,
+            siteId: SITE_ID,
+            fromEmail: 'sender@example.invalid',
+            contents: 'batch-content',
+            batchId: batch.batchId,
+            created: new Date(batch.createdAt),
+        },
+        messages,
+        errors,
+        notifications,
+    }
+}
+
+function buildEscrowBatchRecords(batch: BatchFixture, manifestIndex: number) {
+    const rows = buildPersistedRows(batch)
+    return [
+        { kind: 'newsletterBatch' as const, manifestIndex, row: { ...rows.parent, created: rows.parent.created.toISOString() } },
+        ...rows.messages.map((row) => ({
+            kind: 'newsletterMessages' as const,
+            manifestIndex,
+            row: { ...row, created: row.created.toISOString() },
+        })),
+        ...rows.errors.map((row) => ({
+            kind: 'newsletterErrors' as const,
+            manifestIndex,
+            row: { ...row, created: row.created.toISOString() },
+        })),
+        ...rows.notifications.map((row) => ({
+            kind: 'newsletterNotifications' as const,
+            manifestIndex,
+            row: { ...row, timestamp: row.timestamp.toISOString(), created: row.created.toISOString() },
+        })),
+    ]
 }
 
 function buildInputParts(batches: BatchFixture[] = [DEFAULT_BATCH]) {
@@ -82,7 +153,32 @@ function buildInputParts(batches: BatchFixture[] = [DEFAULT_BATCH]) {
         }))
         .sort((left, right) => left.batchId < right.batchId ? -1 : left.batchId > right.batchId ? 1 : 0)
 
-    const artifact = buildNewsletterRetentionApplyArtifact({ manifest, records })
+    const escrow = {
+        version: NEWSLETTER_RETENTION_ESCROW_VERSION,
+        siteId: manifest.siteId,
+        cutoff: manifest.cutoff,
+        policyVersion: manifest.policyVersion,
+        publicManifestHash: manifest.hash,
+        schemaFingerprint: 'a'.repeat(64),
+        contentHash: 'b'.repeat(64),
+        counts: batches.reduce((counts, batch) => ({
+            batches: counts.batches + 1,
+            messages: counts.messages + batch.messageCount,
+            errors: counts.errors + batch.errorCount,
+            notifications: counts.notifications + batch.notificationCount,
+        }), { batches: 0, messages: 0, errors: 0, notifications: 0 }),
+    }
+    const artifact = buildNewsletterRetentionApplyArtifact({ manifest, escrow, records })
+    const batchByRecordId = new Map(batches.map((batch) => [batch.recordId, batch]))
+    const escrowRecords = artifact.bindings.map((binding) => {
+        const batch = batchByRecordId.get(binding.batchRecordId)
+        if (!batch) throw new Error('missing test batch')
+        return buildEscrowBatchRecords(batch, binding.manifestIndex)
+    })
+    const escrowSource = {
+        verification: escrow,
+        readBatchRecords: vi.fn(async ({ manifestIndex }: { manifestIndex: number }) => escrowRecords[manifestIndex] ?? []),
+    }
 
     return {
         policy: {
@@ -111,11 +207,13 @@ function buildInputParts(batches: BatchFixture[] = [DEFAULT_BATCH]) {
         },
         manifest,
         artifact,
+        escrowSource,
     }
 }
 
 function makeHarness(batch: BatchFixture = DEFAULT_BATCH, overrides: HarnessOverrides = {}) {
     const order: string[] = []
+    const persisted = buildPersistedRows(batch)
     const release = vi.fn(async () => {
         order.push('release')
         if (overrides.releaseFailure) throw overrides.releaseFailure
@@ -130,26 +228,22 @@ function makeHarness(batch: BatchFixture = DEFAULT_BATCH, overrides: HarnessOver
         order.push('parent.findFirst')
         if (overrides.parentFailure) throw overrides.parentFailure
         if (Object.prototype.hasOwnProperty.call(overrides, 'parent')) return overrides.parent
-        return {
-            id: batch.recordId,
-            siteId: SITE_ID,
-            batchId: batch.batchId,
-            created: new Date(batch.createdAt),
-            _count: {
-                NewslettersMessages: batch.messageCount,
-                NewslettersErrors: batch.errorCount,
-            },
-        }
+        return persisted.parent
     })
     const messageFindMany = vi.fn(async () => {
         order.push('messages.findMany')
         if (Object.prototype.hasOwnProperty.call(overrides, 'messages')) return overrides.messages
-        return Array.from({ length: batch.messageCount }, (_, index) => ({
-            messageId: `message-private-${index + 1}`,
-            _count: {
-                notificationEvents: index === 0 ? batch.notificationCount : 0,
-            },
-        }))
+        return persisted.messages
+    })
+    const errorFindMany = vi.fn(async () => {
+        order.push('errors.findMany')
+        if (Object.prototype.hasOwnProperty.call(overrides, 'errors')) return overrides.errors
+        return persisted.errors
+    })
+    const notificationFindMany = vi.fn(async () => {
+        order.push('notifications.findMany')
+        if (Object.prototype.hasOwnProperty.call(overrides, 'notifications')) return overrides.notifications
+        return persisted.notifications
     })
     const orphanCount = vi.fn(async () => {
         order.push(orphanCall === 0 ? 'orphans.preCount' : 'orphans.postCount')
@@ -210,10 +304,12 @@ function makeHarness(batch: BatchFixture = DEFAULT_BATCH, overrides: HarnessOver
             count: messageCount,
         },
         newsletterErrors: {
+            findMany: errorFindMany,
             deleteMany: errorDeleteMany,
             count: errorCount,
         },
         newsletterNotifications: {
+            findMany: notificationFindMany,
             deleteMany: notificationDeleteMany,
             count: notificationCount,
         },
@@ -236,6 +332,8 @@ function makeHarness(batch: BatchFixture = DEFAULT_BATCH, overrides: HarnessOver
         spies: {
             parentFindFirst,
             messageFindMany,
+            errorFindMany,
+            notificationFindMany,
             orphanCount,
             notificationDeleteMany,
             errorDeleteMany,
@@ -341,6 +439,24 @@ describe('executeNewsletterRetentionApply', () => {
         }
     })
 
+    it('rejects a verified source commitment mismatch before lock or DB access', async () => {
+        const harness = makeHarness()
+        const input = makeInput(harness)
+        input.escrowSource = {
+            ...input.escrowSource,
+            verification: {
+                ...input.artifact.escrow,
+                contentHash: 'c'.repeat(64),
+            },
+        }
+
+        await expect(executeNewsletterRetentionApply(input)).rejects.toThrow(
+            'verified escrow source commitment must match apply artifact',
+        )
+        expect(harness.tryAcquire).not.toHaveBeenCalled()
+        expect(harness.transaction).not.toHaveBeenCalled()
+    })
+
     it('refuses overlap before starting a transaction', async () => {
         const harness = makeHarness(DEFAULT_BATCH, { lockAvailable: false })
 
@@ -362,6 +478,8 @@ describe('executeNewsletterRetentionApply', () => {
         expect(receipt).toEqual({
             manifestHash: input.manifest.hash,
             artifactHash: input.artifact.hash,
+            escrowContentHash: input.artifact.escrow.contentHash,
+            schemaFingerprint: input.artifact.escrow.schemaFingerprint,
             siteId: SITE_ID,
             batches: [{
                 manifestIndex: 0,
@@ -377,26 +495,35 @@ describe('executeNewsletterRetentionApply', () => {
             select: {
                 id: true,
                 siteId: true,
+                fromEmail: true,
+                contents: true,
                 batchId: true,
                 created: true,
-                _count: { select: { NewslettersMessages: true, NewslettersErrors: true } },
             },
         })
         expect(harness.spies.messageFindMany).toHaveBeenCalledWith({
             where: { newsletterBatchId: DEFAULT_BATCH.recordId },
             orderBy: [{ id: 'asc' }],
             take: 2,
-            select: { messageId: true, _count: { select: { notificationEvents: true } } },
+            select: {
+                id: true,
+                messageId: true,
+                toEmail: true,
+                newsletterBatchId: true,
+                created: true,
+                formatedContents: true,
+                recipientData: true,
+            },
         })
         expect(harness.spies.orphanCount).toHaveBeenNthCalledWith(1, {
             where: {
-                messageId: { in: ['message-private-1'] },
+                messageId: { in: [`${DEFAULT_BATCH.recordId}-message-id-1`] },
                 reconciledAt: null,
             },
         })
         expect(harness.spies.orphanCount).toHaveBeenNthCalledWith(2, {
             where: {
-                messageId: { in: ['message-private-1'] },
+                messageId: { in: [`${DEFAULT_BATCH.recordId}-message-id-1`] },
                 reconciledAt: null,
             },
         })
@@ -414,6 +541,8 @@ describe('executeNewsletterRetentionApply', () => {
             'transaction',
             'parent.findFirst',
             'messages.findMany',
+            'errors.findMany',
+            'notifications.findMany',
             'orphans.preCount',
             'notifications.deleteMany',
             'errors.deleteMany',
@@ -427,6 +556,35 @@ describe('executeNewsletterRetentionApply', () => {
             'release',
         ])
         expect((harness.tx.newsletterNotificationOrphan as unknown as { deleteMany?: unknown }).deleteMany).toBeUndefined()
+    })
+
+    it('rejects omitted, reordered, and payload-drifted escrow rows before every delete', async () => {
+        const exact = buildEscrowBatchRecords(DEFAULT_BATCH, 0)
+        const variants = [
+            exact.slice(0, -1),
+            [exact[1], exact[0], ...exact.slice(2)],
+            exact.map((record, index) => index === 0
+                ? { ...record, row: { ...record.row, contents: 'drifted-private-payload' } }
+                : record),
+        ]
+
+        for (const records of variants) {
+            const harness = makeHarness()
+            const input = makeInput(harness)
+            const driftedInput: NewsletterRetentionApplyInput = {
+                ...input,
+                escrowSource: {
+                    verification: input.artifact.escrow,
+                    readBatchRecords: vi.fn(async () => records),
+                },
+            }
+
+            await expect(executeNewsletterRetentionApply(driftedInput)).rejects.toThrow('newsletter retention apply failed')
+            expect(harness.spies.notificationDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.errorDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.messageDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.batchDeleteMany).not.toHaveBeenCalled()
+        }
     })
 
     it.each([
@@ -499,7 +657,7 @@ describe('executeNewsletterRetentionApply', () => {
         expect(postMismatch.spies.messageCount).not.toHaveBeenCalled()
     })
 
-    it('handles an empty batch without message, orphan, or notification operations', async () => {
+    it('handles an empty batch with zero-row sentinels but no orphan or notification operations', async () => {
         const emptyBatch: BatchFixture = {
             ...DEFAULT_BATCH,
             messageCount: 0,
@@ -516,10 +674,35 @@ describe('executeNewsletterRetentionApply', () => {
             deletedErrorCount: 0,
             deletedBatchCount: 1,
         })
-        expect(harness.spies.messageFindMany).not.toHaveBeenCalled()
+        expect(harness.spies.messageFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1 }))
+        expect(harness.spies.errorFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1 }))
+        expect(harness.spies.notificationFindMany).not.toHaveBeenCalled()
         expect(harness.spies.orphanCount).not.toHaveBeenCalled()
         expect(harness.spies.notificationDeleteMany).not.toHaveBeenCalled()
         expect(harness.spies.notificationCount).not.toHaveBeenCalled()
+    })
+
+    it('rejects late message or error inserts when both expected counts are zero', async () => {
+        const emptyBatch: BatchFixture = {
+            ...DEFAULT_BATCH,
+            messageCount: 0,
+            notificationCount: 0,
+            errorCount: 0,
+        }
+        const lateRows = buildPersistedRows(DEFAULT_BATCH)
+        for (const overrides of [
+            { messages: [lateRows.messages[0]] },
+            { errors: [lateRows.errors[0]] },
+        ]) {
+            const harness = makeHarness(emptyBatch, overrides)
+            await expect(executeNewsletterRetentionApply(makeInput(harness, [emptyBatch]))).rejects.toThrow(
+                'newsletter retention apply failed',
+            )
+            expect(harness.spies.notificationDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.errorDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.messageDeleteMany).not.toHaveBeenCalled()
+            expect(harness.spies.batchDeleteMany).not.toHaveBeenCalled()
+        }
     })
 
     it('commits batches sequentially, stops after the first failed later batch, and reports partial progress', async () => {
