@@ -1,4 +1,14 @@
 import {
+    parseNewsletterRetentionEscrowRecord,
+    parseNewsletterRetentionEscrowVerificationResult,
+    serializeNewsletterRetentionEscrowRecord,
+    type NewsletterRetentionEscrowRecord,
+} from './newsletter-retention-escrow.js'
+import {
+    streamNewsletterRetentionEscrowRecords,
+    type NewsletterRetentionEscrowLoaderDelegate,
+} from './newsletter-retention-escrow-loader.js'
+import {
     type NewsletterRetentionApplyContext,
     type NewsletterRetentionApplyContextInput,
     parseNewsletterRetentionApplyContext,
@@ -22,6 +32,12 @@ export class NewsletterRetentionApplyError extends Error {
 export interface NewsletterRetentionApplyInput extends NewsletterRetentionApplyContextInput {
     lock: NewsletterRetentionApplyLockProvider
     database: NewsletterRetentionApplyDatabase
+    escrowSource: NewsletterRetentionVerifiedEscrowSource
+}
+
+export interface NewsletterRetentionVerifiedEscrowSource {
+    readonly verification: unknown
+    readBatchRecords(args: { manifestIndex: number }): Promise<readonly unknown[]>
 }
 
 export interface NewsletterRetentionApplyReceiptBatch {
@@ -36,6 +52,8 @@ export interface NewsletterRetentionApplyReceiptBatch {
 export interface NewsletterRetentionApplyReceipt {
     manifestHash: string
     artifactHash: string
+    escrowContentHash: string
+    schemaFingerprint: string
     siteId: string
     batches: NewsletterRetentionApplyReceiptBatch[]
 }
@@ -55,27 +73,23 @@ export interface NewsletterRetentionApplyDatabase {
 }
 
 export interface NewsletterRetentionApplyTransactionClient {
-    newsletterBatch: {
-        findFirst(args: NewsletterRetentionApplyParentFindFirstArgs): Promise<NewsletterRetentionApplyParentRow | null>
+    newsletterBatch: NewsletterRetentionEscrowLoaderDelegate['newsletterBatch'] & {
         deleteMany(args: NewsletterRetentionApplyParentDeleteManyArgs): Promise<{ count: number }>
         count(args: NewsletterRetentionApplyParentCountArgs): Promise<number>
     }
-    newsletterMessages: {
-        findMany(args: NewsletterRetentionApplyMessageFindManyArgs): Promise<NewsletterRetentionApplyMessageRow[]>
+    newsletterMessages: NewsletterRetentionEscrowLoaderDelegate['newsletterMessages'] & {
         deleteMany(args: NewsletterRetentionApplyMessageDeleteManyArgs): Promise<{ count: number }>
         count(args: NewsletterRetentionApplyMessageCountArgs): Promise<number>
     }
-    newsletterErrors: {
+    newsletterErrors: NewsletterRetentionEscrowLoaderDelegate['newsletterErrors'] & {
         deleteMany(args: NewsletterRetentionApplyErrorsDeleteManyArgs): Promise<{ count: number }>
         count(args: NewsletterRetentionApplyErrorsCountArgs): Promise<number>
     }
-    newsletterNotifications: {
+    newsletterNotifications: NewsletterRetentionEscrowLoaderDelegate['newsletterNotifications'] & {
         deleteMany(args: NewsletterRetentionApplyNotificationDeleteManyArgs): Promise<{ count: number }>
         count(args: NewsletterRetentionApplyNotificationCountArgs): Promise<number>
     }
-    newsletterNotificationOrphan: {
-        count(args: NewsletterRetentionApplyOrphanCountArgs): Promise<number>
-    }
+    newsletterNotificationOrphan: NewsletterRetentionEscrowLoaderDelegate['newsletterNotificationOrphan']
 }
 
 export interface NewsletterRetentionApplyParentFindFirstArgs {
@@ -202,6 +216,7 @@ export async function executeNewsletterRetentionApply(input: NewsletterRetention
     }
 
     const context = parseNewsletterRetentionApplyContext(input)
+    const escrowSource = normalizeVerifiedEscrowSource(input.escrowSource, context)
     const lease = await tryAcquireApplyLease(input.lock)
 
     let completedBatchCount = 0
@@ -216,8 +231,20 @@ export async function executeNewsletterRetentionApply(input: NewsletterRetention
         for (const binding of context.artifact.bindings) {
             const manifestBatch = context.manifest.batches[binding.manifestIndex]
             currentManifestIndex = binding.manifestIndex
+            const expectedRecords = await readVerifiedBatchRecords(
+                escrowSource,
+                binding.manifestIndex,
+                manifestBatch,
+            )
             const batchResult = await input.database.$transaction(
-                async (tx) => applyNewsletterRetentionBatch(tx, context, binding.manifestIndex, manifestBatch, binding.batchRecordId),
+                async (tx) => applyNewsletterRetentionBatch(
+                    tx,
+                    context,
+                    binding.manifestIndex,
+                    manifestBatch,
+                    binding.batchRecordId,
+                    expectedRecords,
+                ),
                 { isolationLevel: 'Serializable' },
             )
 
@@ -235,6 +262,8 @@ export async function executeNewsletterRetentionApply(input: NewsletterRetention
         receipt = {
             manifestHash: context.manifest.hash,
             artifactHash: context.artifact.hash,
+            escrowContentHash: context.artifact.escrow.contentHash,
+            schemaFingerprint: context.artifact.escrow.schemaFingerprint,
             siteId: context.manifest.siteId,
             batches,
         }
@@ -288,171 +317,149 @@ async function tryAcquireApplyLease(lock: NewsletterRetentionApplyLockProvider):
     }
 }
 
+function normalizeVerifiedEscrowSource(
+    value: unknown,
+    context: NewsletterRetentionApplyContext,
+): NewsletterRetentionVerifiedEscrowSource {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('verified escrow source must be an object')
+    }
+    const source = value as Partial<NewsletterRetentionVerifiedEscrowSource>
+    if (typeof source.readBatchRecords !== 'function') {
+        throw new Error('verified escrow source must provide readBatchRecords')
+    }
+    const verification = parseNewsletterRetentionEscrowVerificationResult(source.verification)
+    if (JSON.stringify(verification) !== JSON.stringify(context.artifact.escrow)) {
+        throw new Error('verified escrow source commitment must match apply artifact')
+    }
+    return value as NewsletterRetentionVerifiedEscrowSource
+}
+
+async function readVerifiedBatchRecords(
+    source: NewsletterRetentionVerifiedEscrowSource,
+    manifestIndex: number,
+    manifestBatch: NewsletterRetentionApplyContext['manifest']['batches'][number],
+): Promise<readonly NewsletterRetentionEscrowRecord[]> {
+    const rows = await source.readBatchRecords({ manifestIndex })
+    if (!Array.isArray(rows)) {
+        throw new Error('verified escrow source batch records must be an array')
+    }
+    const expectedRecordCount = safeAddIntegers(
+        safeAddIntegers(
+            safeAddIntegers(1, manifestBatch.messageCount, 'verified escrow batch record count'),
+            manifestBatch.errorCount,
+            'verified escrow batch record count',
+        ),
+        manifestBatch.notificationCount,
+        'verified escrow batch record count',
+    )
+    if (rows.length !== expectedRecordCount) {
+        throw new Error('verified escrow source batch record count mismatch')
+    }
+    return rows.map((row) => {
+        const record = parseNewsletterRetentionEscrowRecord(row)
+        if (record.manifestIndex !== manifestIndex) {
+            throw new Error('verified escrow source manifest index mismatch')
+        }
+        return record
+    })
+}
+
+function assertExactEscrowBatchRecords(
+    actual: readonly NewsletterRetentionEscrowRecord[],
+    expected: readonly NewsletterRetentionEscrowRecord[],
+): void {
+    if (actual.length !== expected.length) {
+        throw new Error('transactional escrow record count mismatch')
+    }
+    for (let index = 0; index < actual.length; index += 1) {
+        if (serializeNewsletterRetentionEscrowRecord(actual[index]) !== serializeNewsletterRetentionEscrowRecord(expected[index])) {
+            throw new Error('transactional escrow record mismatch')
+        }
+    }
+}
+
 async function applyNewsletterRetentionBatch(
     tx: NewsletterRetentionApplyTransactionClient,
     context: NewsletterRetentionApplyContext,
     manifestIndex: number,
     manifestBatch: NewsletterRetentionApplyContext['manifest']['batches'][number],
     batchRecordId: string,
+    expectedRecords: readonly NewsletterRetentionEscrowRecord[],
 ): Promise<NewsletterRetentionApplyReceiptBatch> {
-    const parent = await tx.newsletterBatch.findFirst({
-        where: {
-            id: batchRecordId,
-            siteId: context.manifest.siteId,
-        },
-        select: {
-            id: true,
-            siteId: true,
-            batchId: true,
-            created: true,
-            _count: {
-                select: {
-                    NewslettersMessages: true,
-                    NewslettersErrors: true,
-                },
-            },
-        },
-    })
-
-    const normalizedParent = normalizeParentRow(parent, batchRecordId, context.manifest.siteId)
-    if (normalizedParent.batchId !== manifestBatch.batchId) {
-        throw new Error('newsletter batch parent batchId does not match manifest')
+    const candidate = {
+        siteId: context.manifest.siteId,
+        batchRecordId,
+        batchId: manifestBatch.batchId,
+        createdAt: manifestBatch.createdAt,
+        messageCount: manifestBatch.messageCount,
+        notificationCount: manifestBatch.notificationCount,
+        errorCount: manifestBatch.errorCount,
+        orphanCount: 0,
+        correlationComplete: true,
     }
-
-    if (normalizedParent.created !== manifestBatch.createdAt) {
-        throw new Error('newsletter batch parent created does not match manifest')
+    const actualRecords: NewsletterRetentionEscrowRecord[] = []
+    for await (const record of streamNewsletterRetentionEscrowRecords(tx, context.policy, [candidate])) {
+        actualRecords.push({ ...record, manifestIndex })
     }
+    assertExactEscrowBatchRecords(actualRecords, expectedRecords)
 
-    if (Date.parse(normalizedParent.created) >= Date.parse(context.manifest.cutoff)) {
-        throw new Error('newsletter batch parent created must be strictly before cutoff')
+    const parentRecord = actualRecords[0]
+    if (!parentRecord || parentRecord.kind !== 'newsletterBatch') {
+        throw new Error('transactional escrow batch parent is missing')
     }
-
-    if (normalizedParent._count.NewslettersMessages !== manifestBatch.messageCount) {
-        throw new Error('newsletter batch message count does not match manifest')
-    }
-
-    if (normalizedParent._count.NewslettersErrors !== manifestBatch.errorCount) {
-        throw new Error('newsletter batch error count does not match manifest')
-    }
-
-    const messageRows = manifestBatch.messageCount === 0
-        ? []
-        : await tx.newsletterMessages.findMany({
-            where: {
-                newsletterBatchId: normalizedParent.id,
-            },
-            orderBy: [{ id: 'asc' }],
-            take: manifestBatch.messageCount + 1,
-            select: {
-                messageId: true,
-                _count: {
-                    select: {
-                        notificationEvents: true,
-                    },
-                },
-            },
-        })
-
-    const normalizedMessages = normalizeMessageRows(messageRows, manifestBatch.messageCount)
-    const messageIds = normalizedMessages.map((row) => row.messageId)
-    const totalNotificationCount = normalizedMessages.reduce(
-        (total, row) => safeAddIntegers(total, row._count.notificationEvents, 'newsletterMessages._count.notificationEvents'),
-        0,
-    )
-
-    if (totalNotificationCount !== manifestBatch.notificationCount) {
-        throw new Error('newsletter message notification count does not match manifest')
-    }
-
-    if (messageIds.length > 0) {
-        const orphanCount = await tx.newsletterNotificationOrphan.count({
-            where: {
-                messageId: {
-                    in: messageIds,
-                },
-                reconciledAt: null,
-            },
-        })
-
-        if (!Number.isSafeInteger(orphanCount) || orphanCount < 0) {
-            throw new Error('newsletterNotificationOrphan.count must be a non-negative safe integer')
-        }
-
-        if (orphanCount !== 0) {
-            throw new Error('newsletter notification orphan ledger must be empty before delete')
-        }
-    }
+    const parent = parentRecord.row
+    const messageIds = actualRecords.flatMap((record) => (
+        record.kind === 'newsletterMessages' ? [record.row.messageId] : []
+    ))
 
     let deletedNotificationCount = 0
     if (messageIds.length > 0) {
         deletedNotificationCount = await deleteAndValidateCount(
-            tx.newsletterNotifications.deleteMany({
-                where: {
-                    messageId: {
-                        in: messageIds,
-                    },
-                },
-            }),
+            tx.newsletterNotifications.deleteMany({ where: { messageId: { in: messageIds } } }),
             manifestBatch.notificationCount,
             'newsletterNotifications.deleteMany',
         )
     }
 
     const deletedErrorCount = await deleteAndValidateCount(
-        tx.newsletterErrors.deleteMany({
-            where: {
-                newsletterBatchId: normalizedParent.id,
-            },
-        }),
-        normalizedParent._count.NewslettersErrors,
+        tx.newsletterErrors.deleteMany({ where: { newsletterBatchId: parent.id } }),
+        manifestBatch.errorCount,
         'newsletterErrors.deleteMany',
     )
-
     const deletedMessageCount = await deleteAndValidateCount(
-        tx.newsletterMessages.deleteMany({
-            where: {
-                newsletterBatchId: normalizedParent.id,
-            },
-        }),
+        tx.newsletterMessages.deleteMany({ where: { newsletterBatchId: parent.id } }),
         manifestBatch.messageCount,
         'newsletterMessages.deleteMany',
     )
-
     const deletedBatchCount = await deleteAndValidateCount(
         tx.newsletterBatch.deleteMany({
             where: {
-                id: normalizedParent.id,
-                siteId: normalizedParent.siteId,
-                batchId: normalizedParent.batchId,
-                created: new Date(normalizedParent.created),
+                id: parent.id,
+                siteId: parent.siteId,
+                batchId: parent.batchId,
+                created: new Date(parent.created),
             },
         }),
         1,
         'newsletterBatch.deleteMany',
     )
 
-    if (await tx.newsletterBatch.count({ where: { id: normalizedParent.id, siteId: normalizedParent.siteId } }) !== 0) {
+    if (await tx.newsletterBatch.count({ where: { id: parent.id, siteId: parent.siteId } }) !== 0) {
         throw new Error('newsletterBatch postcondition failed')
     }
-
-    if (await tx.newsletterMessages.count({ where: { newsletterBatchId: normalizedParent.id } }) !== 0) {
+    if (await tx.newsletterMessages.count({ where: { newsletterBatchId: parent.id } }) !== 0) {
         throw new Error('newsletterMessages postcondition failed')
     }
-
-    if (await tx.newsletterErrors.count({ where: { newsletterBatchId: normalizedParent.id } }) !== 0) {
+    if (await tx.newsletterErrors.count({ where: { newsletterBatchId: parent.id } }) !== 0) {
         throw new Error('newsletterErrors postcondition failed')
     }
-
     if (messageIds.length > 0) {
         if (await tx.newsletterNotifications.count({ where: { messageId: { in: messageIds } } }) !== 0) {
             throw new Error('newsletterNotifications postcondition failed')
         }
-
         if (await tx.newsletterNotificationOrphan.count({
-            where: {
-                messageId: { in: messageIds },
-                reconciledAt: null,
-            },
+            where: { messageId: { in: messageIds }, reconciledAt: null },
         }) !== 0) {
             throw new Error('newsletterNotificationOrphan postcondition failed')
         }
@@ -466,133 +473,6 @@ async function applyNewsletterRetentionBatch(
         deletedMessageCount,
         deletedBatchCount,
     }
-}
-
-function normalizeParentRow(
-    row: unknown,
-    batchRecordId: string,
-    siteId: string,
-): {
-    id: string
-    siteId: string
-    batchId: string
-    created: string
-    _count: {
-        NewslettersMessages: number
-        NewslettersErrors: number
-    }
-} {
-    if (!row || typeof row !== 'object' || Array.isArray(row)) {
-        throw new Error('newsletterBatch.findFirst must return a plain object')
-    }
-
-    const candidate = row as {
-        id?: unknown
-        siteId?: unknown
-        batchId?: unknown
-        created?: unknown
-        _count?: unknown
-    }
-
-    if (candidate.id !== batchRecordId) {
-        throw new Error('newsletter batch parent id does not match batchRecordId')
-    }
-
-    if (candidate.siteId !== siteId) {
-        throw new Error('newsletter batch parent siteId does not match policy siteId')
-    }
-
-    const created = normalizeDate((candidate.created), 'newsletterBatch.created')
-    const counts = normalizeBatchCounts(candidate._count)
-
-    return {
-        id: normalizeExactNonBlankString(candidate.id, 'newsletterBatch.id'),
-        siteId: normalizeExactNonBlankString(candidate.siteId, 'newsletterBatch.siteId'),
-        batchId: normalizeExactNonBlankString(candidate.batchId, 'newsletterBatch.batchId'),
-        created,
-        _count: counts,
-    }
-}
-
-function normalizeBatchCounts(value: unknown): { NewslettersMessages: number; NewslettersErrors: number } {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('newsletterBatch row must include aggregate child counts')
-    }
-
-    const candidate = value as { NewslettersMessages?: unknown; NewslettersErrors?: unknown }
-    return {
-        NewslettersMessages: normalizeCount(candidate.NewslettersMessages, 'newsletterBatch._count.NewslettersMessages'),
-        NewslettersErrors: normalizeCount(candidate.NewslettersErrors, 'newsletterBatch._count.NewslettersErrors'),
-    }
-}
-
-function normalizeMessageRows(rows: unknown, expectedCount: number): NewsletterRetentionApplyMessageRow[] {
-    if (!Array.isArray(rows)) {
-        throw new Error('newsletterMessages.findMany must return an array')
-    }
-
-    if (rows.length !== expectedCount) {
-        throw new Error('newsletterMessages.findMany returned unexpected number of rows')
-    }
-
-    const seen = new Set<string>()
-    return rows.map((row, index) => {
-        if (!row || typeof row !== 'object' || Array.isArray(row)) {
-            throw new Error(`newsletterMessages.findMany[${index}] must be a plain object`)
-        }
-
-        const candidate = row as { messageId?: unknown; _count?: unknown }
-        const messageId = normalizeMessageId(candidate.messageId)
-        if (seen.has(messageId)) {
-            throw new Error('newsletterMessages.findMany returned duplicate messageId')
-        }
-
-        seen.add(messageId)
-        return {
-            messageId,
-            _count: normalizeMessageCount(candidate._count),
-        }
-    })
-}
-
-function normalizeMessageCount(value: unknown): { notificationEvents: number } {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('newsletterMessages row must include notification event counts')
-    }
-
-    const candidate = value as { notificationEvents?: unknown }
-    return {
-        notificationEvents: normalizeCount(candidate.notificationEvents, 'newsletterMessages._count.notificationEvents'),
-    }
-}
-
-function normalizeMessageId(value: unknown): string {
-    if (typeof value !== 'string' || !/\S/.test(value)) {
-        throw new Error('newsletterMessages.messageId must be a non-empty string')
-    }
-
-    return value
-}
-
-function normalizeExactNonBlankString(value: unknown, field: string): string {
-    if (typeof value !== 'string' || value.length === 0 || !/\S/.test(value)) {
-        throw new Error(`${field} must be a non-empty string`)
-    }
-
-    return value
-}
-
-function normalizeDate(value: unknown, field: string): string {
-    if (!(value instanceof Date)) {
-        throw new Error(`${field} must be a Date`)
-    }
-
-    const timestamp = value.getTime()
-    if (!Number.isFinite(timestamp)) {
-        throw new Error(`${field} must be a Date`)
-    }
-
-    return value.toISOString()
 }
 
 function normalizeCount(value: unknown, field: string): number {

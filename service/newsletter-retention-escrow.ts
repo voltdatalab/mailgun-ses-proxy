@@ -14,6 +14,16 @@ const LOWERCASE_HEX_64 = /^[a-f0-9]{64}$/
 
 const HEADER_KEYS = ['kind', 'version', 'siteId', 'cutoff', 'policyVersion', 'publicManifestHash', 'schemaFingerprint'] as const
 const FOOTER_KEYS = ['kind', 'counts', 'contentHash'] as const
+const VERIFICATION_RESULT_KEYS = [
+    'version',
+    'siteId',
+    'cutoff',
+    'policyVersion',
+    'publicManifestHash',
+    'schemaFingerprint',
+    'contentHash',
+    'counts',
+] as const
 const COUNT_KEYS = ['batches', 'messages', 'errors', 'notifications'] as const
 const BATCH_ROW_KEYS = ['id', 'siteId', 'fromEmail', 'contents', 'batchId', 'created'] as const
 const MESSAGE_ROW_KEYS = ['id', 'messageId', 'toEmail', 'newsletterBatchId', 'created', 'formatedContents', 'recipientData'] as const
@@ -186,6 +196,42 @@ export function serializeNewsletterRetentionEscrowFooter(footer: NewsletterReten
         ])],
         ['contentHash', stringifyString(normalized.contentHash)],
     ])
+}
+
+export function parseNewsletterRetentionEscrowRecord(value: unknown): NewsletterRetentionEscrowRecord {
+    return normalizeEscrowRecord(value)
+}
+
+export function parseNewsletterRetentionEscrowVerificationResult(
+    value: unknown,
+): NewsletterRetentionEscrowVerificationResult {
+    expectPlainObjectWithExactKeys(value, VERIFICATION_RESULT_KEYS, 'escrow verification result')
+    const candidate = value as Record<string, unknown>
+    const header = normalizeEscrowHeader({
+        kind: 'header',
+        version: candidate.version,
+        siteId: candidate.siteId,
+        cutoff: candidate.cutoff,
+        policyVersion: candidate.policyVersion,
+        publicManifestHash: candidate.publicManifestHash,
+        schemaFingerprint: candidate.schemaFingerprint,
+    })
+    const footer = normalizeEscrowFooter({
+        kind: 'footer',
+        counts: candidate.counts,
+        contentHash: candidate.contentHash,
+    })
+
+    return {
+        version: header.version,
+        siteId: header.siteId,
+        cutoff: header.cutoff,
+        policyVersion: header.policyVersion,
+        publicManifestHash: header.publicManifestHash,
+        schemaFingerprint: header.schemaFingerprint,
+        contentHash: footer.contentHash,
+        counts: { ...footer.counts },
+    }
 }
 
 export function createNewsletterRetentionEscrowAccumulator(options: NewsletterRetentionEscrowAccumulatorOptions = {}): NewsletterRetentionEscrowAccumulator {

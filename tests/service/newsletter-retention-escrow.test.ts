@@ -10,6 +10,7 @@ import {
     NEWSLETTER_RETENTION_ESCROW_MAX_TOTAL_BYTES,
     NEWSLETTER_RETENTION_ESCROW_VERSION,
     createNewsletterRetentionEscrowAccumulator,
+    parseNewsletterRetentionEscrowVerificationResult,
     serializeNewsletterRetentionEscrowFooter,
     serializeNewsletterRetentionEscrowHeader,
     serializeNewsletterRetentionEscrowRecord,
@@ -385,6 +386,33 @@ describe('service/newsletter-retention-escrow', () => {
             manifestIndex: 0,
             row: {},
         }))).toThrow('record kind must be a known model')
+    })
+
+    it('parses only an exact public verification commitment shape', () => {
+        const commitment = {
+            version: NEWSLETTER_RETENTION_ESCROW_VERSION,
+            siteId: HEADER.siteId,
+            cutoff: HEADER.cutoff,
+            policyVersion: HEADER.policyVersion,
+            publicManifestHash: HEADER.publicManifestHash,
+            schemaFingerprint: HEADER.schemaFingerprint,
+            contentHash: 'c'.repeat(64),
+            counts: { batches: 1, messages: 2, errors: 3, notifications: 4 },
+        }
+
+        expect(parseNewsletterRetentionEscrowVerificationResult(commitment)).toEqual(commitment)
+        expect(() => parseNewsletterRetentionEscrowVerificationResult({
+            ...commitment,
+            secret: 'must-not-be-accepted',
+        })).toThrow('escrow verification result must have exact keys')
+        expect(() => parseNewsletterRetentionEscrowVerificationResult({
+            ...commitment,
+            contentHash: 'not-a-hash',
+        })).toThrow('contentHash must be a lowercase 64-hex string')
+        expect(() => parseNewsletterRetentionEscrowVerificationResult({
+            ...commitment,
+            counts: { ...commitment.counts, messages: -1 },
+        })).toThrow('messages must be a non-negative safe integer')
     })
 
     it('enforces byte, total byte, record, batch, and message limits', () => {

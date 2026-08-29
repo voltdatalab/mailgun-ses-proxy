@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { buildNewsletterRetentionManifest } from '@/service/newsletter-retention'
+import type { NewsletterRetentionEscrowDryRunResult } from '@/service/newsletter-retention-coordinator'
+import { NEWSLETTER_RETENTION_ESCROW_VERSION } from '@/service/newsletter-retention-escrow'
 import { buildNewsletterRetentionApplyArtifact } from '@/service/newsletter-retention-apply'
 import {
     executeNewsletterRetentionCli,
@@ -21,8 +23,10 @@ const CUTOFF = '2026-08-27T12:00:00.000Z'
 const EVIDENCE_PATH = '/safe/evidence.json'
 const MANIFEST_PATH = '/safe/manifest.json'
 const ARTIFACT_PATH = '/safe/private-artifact.json'
+const ESCROW_PATH = '/safe/escrow.jsonl'
 const MANIFEST_OUT_PATH = '/safe/output-manifest.json'
 const ARTIFACT_OUT_PATH = '/safe/output-artifact.json'
+const ESCROW_OUT_PATH = '/safe/output-escrow.jsonl'
 
 const evidence = {
     now: '1900-01-01T00:00:00.000Z',
@@ -58,29 +62,100 @@ const privateRecord = {
     correlationComplete: true,
 }
 
+const persistedRows = {
+    batch: {
+        id: privateRecord.batchRecordId,
+        siteId: SITE_ID,
+        fromEmail: 'sender@example.invalid',
+        contents: 'batch-content',
+        batchId: privateRecord.batchId,
+        created: new Date(privateRecord.createdAt),
+    },
+    messages: [{
+        id: 'private-message-row-id',
+        messageId: 'private-message-id',
+        toEmail: 'recipient@example.invalid',
+        newsletterBatchId: privateRecord.batchRecordId,
+        created: new Date(privateRecord.createdAt),
+        formatedContents: 'message-content',
+        recipientData: null,
+    }],
+    errors: [{
+        id: 'private-error-row-id',
+        toEmail: 'error-recipient@example.invalid',
+        error: 'error-payload',
+        created: new Date(privateRecord.createdAt),
+        newsletterBatchId: privateRecord.batchRecordId,
+        messageId: 'private-error-message-id',
+        formatedContents: 'error-content',
+        recipientData: null,
+    }],
+    notifications: [
+        {
+            id: 'private-notification-row-id-1',
+            type: 'delivered',
+            notificationId: 'private-notification-id-1',
+            messageId: 'private-message-id',
+            rawEvent: 'notification-payload-1',
+            timestamp: new Date(privateRecord.createdAt),
+            created: new Date(privateRecord.createdAt),
+        },
+        {
+            id: 'private-notification-row-id-2',
+            type: 'opened',
+            notificationId: 'private-notification-id-2',
+            messageId: 'private-message-id',
+            rawEvent: 'notification-payload-2',
+            timestamp: new Date(privateRecord.createdAt),
+            created: new Date(privateRecord.createdAt),
+        },
+    ],
+}
+
+function makeEscrowBatchRecords(manifestIndex: number) {
+    return [
+        {
+            kind: 'newsletterBatch' as const,
+            manifestIndex,
+            row: { ...persistedRows.batch, created: persistedRows.batch.created.toISOString() },
+        },
+        ...persistedRows.messages.map((row) => ({
+            kind: 'newsletterMessages' as const,
+            manifestIndex,
+            row: { ...row, created: row.created.toISOString() },
+        })),
+        ...persistedRows.errors.map((row) => ({
+            kind: 'newsletterErrors' as const,
+            manifestIndex,
+            row: { ...row, created: row.created.toISOString() },
+        })),
+        ...persistedRows.notifications.map((row) => ({
+            kind: 'newsletterNotifications' as const,
+            manifestIndex,
+            row: { ...row, timestamp: row.timestamp.toISOString(), created: row.created.toISOString() },
+        })),
+    ]
+}
+
 function makeDatabase() {
     const tx = {
         newsletterBatch: {
-            findFirst: vi.fn(async () => ({
-                id: privateRecord.batchRecordId,
-                siteId: SITE_ID,
-                batchId: privateRecord.batchId,
-                created: new Date(privateRecord.createdAt),
-                _count: { NewslettersMessages: 1, NewslettersErrors: 1 },
-            })),
+            findFirst: vi.fn(async () => persistedRows.batch),
             deleteMany: vi.fn(async () => ({ count: 1 })),
             count: vi.fn(async () => 0),
         },
         newsletterMessages: {
-            findMany: vi.fn(async () => [{ messageId: 'private-message-id', _count: { notificationEvents: 2 } }]),
+            findMany: vi.fn(async () => persistedRows.messages),
             deleteMany: vi.fn(async () => ({ count: 1 })),
             count: vi.fn(async () => 0),
         },
         newsletterErrors: {
+            findMany: vi.fn(async () => persistedRows.errors),
             deleteMany: vi.fn(async () => ({ count: 1 })),
             count: vi.fn(async () => 0),
         },
         newsletterNotifications: {
+            findMany: vi.fn(async () => persistedRows.notifications),
             deleteMany: vi.fn(async () => ({ count: 2 })),
             count: vi.fn(async () => 0),
         },
@@ -97,9 +172,23 @@ function makeDatabase() {
                 created: new Date(privateRecord.createdAt),
                 _count: { NewslettersErrors: 1, NewslettersMessages: 1 },
             }]),
+            findFirst: vi.fn(async () => persistedRows.batch),
         },
         newsletterMessages: {
-            findMany: vi.fn(async () => [{ messageId: 'private-message-id', _count: { notificationEvents: 2 } }]),
+            findMany: vi.fn(async (args: { select: { id?: true } }) => (
+                args.select.id === true
+                    ? persistedRows.messages
+                    : persistedRows.messages.map((row) => ({
+                        messageId: row.messageId,
+                        _count: { notificationEvents: 2 },
+                    }))
+            )),
+        },
+        newsletterErrors: {
+            findMany: vi.fn(async () => persistedRows.errors),
+        },
+        newsletterNotifications: {
+            findMany: vi.fn(async () => persistedRows.notifications),
         },
         newsletterNotificationOrphan: {
             count: vi.fn(async () => 0),
@@ -129,10 +218,26 @@ function makeDependencies(files: Record<string, unknown> = { [EVIDENCE_PATH]: ev
         void value
         void mode
     })
+    const schemaFingerprint = vi.fn(() => 'a'.repeat(64))
+    const writeEscrowFileExclusive = vi.fn(async (
+        _path: string,
+        producer: (writeChunk: (chunk: Uint8Array) => Promise<void>) => Promise<NewsletterRetentionEscrowDryRunResult>,
+    ) => producer(async () => undefined))
+    const source = {
+        verification: makeApplyFiles().escrow,
+        readBatchRecords: vi.fn(async ({ manifestIndex }: { manifestIndex: number }) => (
+            manifestIndex === 0 ? makeEscrowBatchRecords(manifestIndex) : []
+        )),
+        close: vi.fn(async () => undefined),
+    }
+    const openVerifiedEscrowSource = vi.fn(async () => source)
     const dependencies: NewsletterRetentionCliDependencies = {
         database,
         createLockProvider,
         now: () => new Date(NOW),
+        schemaFingerprint,
+        writeEscrowFileExclusive,
+        openVerifiedEscrowSource,
         readJsonFile,
         writeJsonFileExclusive,
     }
@@ -146,6 +251,10 @@ function makeDependencies(files: Record<string, unknown> = { [EVIDENCE_PATH]: ev
         createLockProvider,
         readJsonFile,
         writeJsonFileExclusive,
+        schemaFingerprint,
+        writeEscrowFileExclusive,
+        openVerifiedEscrowSource,
+        source,
     }
 }
 
@@ -165,8 +274,23 @@ function makeApplyFiles() {
         cutoff: CUTOFF,
         batches: [privateRecord],
     })
-    const artifact = buildNewsletterRetentionApplyArtifact({ manifest, records: [privateRecord] })
-    return { manifest, artifact }
+    const escrow = {
+        version: NEWSLETTER_RETENTION_ESCROW_VERSION,
+        siteId: manifest.siteId,
+        cutoff: manifest.cutoff,
+        policyVersion: manifest.policyVersion,
+        publicManifestHash: manifest.hash,
+        schemaFingerprint: 'a'.repeat(64),
+        contentHash: 'b'.repeat(64),
+        counts: {
+            batches: 1,
+            messages: privateRecord.messageCount,
+            errors: privateRecord.errorCount,
+            notifications: privateRecord.notificationCount,
+        },
+    }
+    const artifact = buildNewsletterRetentionApplyArtifact({ manifest, escrow, records: [privateRecord] })
+    return { manifest, artifact, escrow }
 }
 
 const temporaryDirectories: string[] = []
@@ -221,11 +345,13 @@ describe('newsletter retention CLI engine', () => {
             ...baseArgs(),
             '--manifest-out', MANIFEST_OUT_PATH,
             '--private-artifact-out', ARTIFACT_OUT_PATH,
+            '--escrow-out', ESCROW_OUT_PATH,
         ]
 
         const output = await executeNewsletterRetentionCli(args, harness.dependencies)
 
         expect(harness.writeJsonFileExclusive).toHaveBeenCalledTimes(2)
+        expect(harness.writeEscrowFileExclusive).toHaveBeenCalledWith(ESCROW_OUT_PATH, expect.any(Function))
         expect(harness.writeJsonFileExclusive.mock.calls[0][0]).toBe(ARTIFACT_OUT_PATH)
         expect(harness.writeJsonFileExclusive.mock.calls[0][2]).toBe(0o600)
         expect(harness.writeJsonFileExclusive.mock.calls[1][0]).toBe(MANIFEST_OUT_PATH)
@@ -239,6 +365,46 @@ describe('newsletter retention CLI engine', () => {
 
     it('preserves the loader exact-ID tie-break when public batch fields are identical', async () => {
         const harness = makeDependencies()
+        const tiedRecords = ['row-a', 'row-z'].map((batchRecordId) => ({
+            siteId: SITE_ID,
+            batchRecordId,
+            batchId: 'same-public-batch',
+            createdAt: '2026-08-27T10:00:00.000Z',
+            messageCount: 0,
+            notificationCount: 0,
+            errorCount: 0,
+            orphanCount: 0,
+            correlationComplete: true,
+        }))
+        const tiedManifest = buildNewsletterRetentionManifest({
+            siteId: SITE_ID,
+            cutoff: CUTOFF,
+            batches: tiedRecords,
+        })
+        const tiedEscrow = {
+            version: NEWSLETTER_RETENTION_ESCROW_VERSION,
+            siteId: tiedManifest.siteId,
+            cutoff: tiedManifest.cutoff,
+            policyVersion: tiedManifest.policyVersion,
+            publicManifestHash: tiedManifest.hash,
+            schemaFingerprint: 'a'.repeat(64),
+            contentHash: 'b'.repeat(64),
+            counts: { batches: 2, messages: 0, errors: 0, notifications: 0 },
+        }
+        harness.writeEscrowFileExclusive.mockImplementationOnce(async () => ({
+            dryRun: true,
+            policyVersion: tiedManifest.policyVersion,
+            plan: {
+                siteId: SITE_ID,
+                cutoff: CUTOFF,
+                policyVersion: tiedManifest.policyVersion,
+                batchCount: 2,
+                totals: { messageCount: 0, notificationCount: 0, errorCount: 0 },
+                batches: [],
+            },
+            manifest: tiedManifest,
+            escrow: tiedEscrow,
+        } as NewsletterRetentionEscrowDryRunResult))
         vi.mocked(harness.database.newsletterBatch.findMany).mockResolvedValueOnce([
             {
                 id: 'row-z',
@@ -255,7 +421,7 @@ describe('newsletter retention CLI engine', () => {
         ])
 
         const output = await executeNewsletterRetentionCli(
-            [...baseArgs(), '--private-artifact-out', ARTIFACT_OUT_PATH],
+            [...baseArgs(), '--private-artifact-out', ARTIFACT_OUT_PATH, '--escrow-out', ESCROW_OUT_PATH],
             harness.dependencies,
         )
 
@@ -277,6 +443,7 @@ describe('newsletter retention CLI engine', () => {
             ...baseArgs(),
             '--manifest-out', MANIFEST_OUT_PATH,
             '--private-artifact-out', MANIFEST_OUT_PATH,
+            '--escrow-out', ESCROW_OUT_PATH,
         ], harness.dependencies)).rejects.toThrow('newsletter retention file paths must be distinct')
 
         expect(harness.readJsonFile).not.toHaveBeenCalled()
@@ -293,6 +460,7 @@ describe('newsletter retention CLI engine', () => {
             ...baseArgs(),
             '--manifest-out', MANIFEST_OUT_PATH,
             '--private-artifact-out', ARTIFACT_OUT_PATH,
+            '--escrow-out', ESCROW_OUT_PATH,
         ], harness.dependencies)).rejects.toThrow('newsletter retention dry-run failed')
 
         expect(harness.writeJsonFileExclusive).toHaveBeenNthCalledWith(1, ARTIFACT_OUT_PATH, expect.any(Object), 0o600)
@@ -304,7 +472,7 @@ describe('newsletter retention CLI engine', () => {
         const incomplete = [...baseArgs(), '--apply']
 
         await expect(executeNewsletterRetentionCli(incomplete, harness.dependencies)).rejects.toThrow(
-            'apply requires manifest, private artifact, expected hashes, and tenant confirmation',
+            'apply requires manifest, private artifact, escrow, expected hashes, and tenant confirmation',
         )
         expect(harness.readJsonFile).not.toHaveBeenCalled()
         expect(harness.transaction).not.toHaveBeenCalled()
@@ -312,9 +480,9 @@ describe('newsletter retention CLI engine', () => {
     })
 
     it('rejects tenant-confirmation mismatch before file reads', async () => {
-        const { manifest, artifact } = makeApplyFiles()
+        const { manifest, artifact, escrow } = makeApplyFiles()
         const harness = makeDependencies()
-        const args = applyArgs(manifest.hash, artifact.hash)
+        const args = applyArgs(manifest.hash, artifact.hash, escrow.contentHash)
         args[args.indexOf('--confirm-site-id') + 1] = 'other-tenant'
 
         await expect(executeNewsletterRetentionCli(args, harness.dependencies)).rejects.toThrow(
@@ -324,13 +492,13 @@ describe('newsletter retention CLI engine', () => {
     })
 
     it('rejects expected-hash mismatch before lock acquisition or transaction', async () => {
-        const { manifest, artifact } = makeApplyFiles()
+        const { manifest, artifact, escrow } = makeApplyFiles()
         const harness = makeDependencies({
             [EVIDENCE_PATH]: evidence,
             [MANIFEST_PATH]: manifest,
             [ARTIFACT_PATH]: artifact,
         })
-        const args = applyArgs('0'.repeat(64), artifact.hash)
+        const args = applyArgs('0'.repeat(64), artifact.hash, escrow.contentHash)
 
         await expect(executeNewsletterRetentionCli(args, harness.dependencies)).rejects.toThrow(
             'newsletter retention expected hash confirmation failed',
@@ -340,20 +508,25 @@ describe('newsletter retention CLI engine', () => {
     })
 
     it('applies only with exact confirmations and returns a privacy-safe receipt', async () => {
-        const { manifest, artifact } = makeApplyFiles()
+        const { manifest, artifact, escrow } = makeApplyFiles()
         const harness = makeDependencies({
             [EVIDENCE_PATH]: evidence,
             [MANIFEST_PATH]: manifest,
             [ARTIFACT_PATH]: artifact,
         })
 
-        const output = await executeNewsletterRetentionCli(applyArgs(manifest.hash, artifact.hash), harness.dependencies)
+        const output = await executeNewsletterRetentionCli(
+            applyArgs(manifest.hash, artifact.hash, escrow.contentHash),
+            harness.dependencies,
+        )
 
         expect(output.mode).toBe('apply')
         expect(output.dryRun).toBe(false)
         expect(harness.readJsonFile).toHaveBeenNthCalledWith(1, EVIDENCE_PATH, 'public')
         expect(harness.readJsonFile).toHaveBeenNthCalledWith(2, MANIFEST_PATH, 'public')
         expect(harness.readJsonFile).toHaveBeenNthCalledWith(3, ARTIFACT_PATH, 'private')
+        expect(harness.openVerifiedEscrowSource).toHaveBeenCalledWith(ESCROW_PATH)
+        expect(harness.source.close).toHaveBeenCalledOnce()
         expect(harness.createLockProvider).toHaveBeenCalledOnce()
         expect(harness.transaction).toHaveBeenCalledOnce()
         expect(harness.release).toHaveBeenCalledOnce()
@@ -403,14 +576,16 @@ describe('newsletter retention CLI engine', () => {
     })
 })
 
-function applyArgs(manifestHash: string, artifactHash: string): string[] {
+function applyArgs(manifestHash: string, artifactHash: string, escrowContentHash: string): string[] {
     return [
         ...baseArgs(),
         '--apply',
         '--manifest-file', MANIFEST_PATH,
         '--private-artifact-file', ARTIFACT_PATH,
+        '--escrow-file', ESCROW_PATH,
         '--expected-manifest-hash', manifestHash,
         '--expected-artifact-hash', artifactHash,
+        '--expected-escrow-content-hash', escrowContentHash,
         '--confirm-site-id', SITE_ID,
     ]
 }

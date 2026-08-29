@@ -15,7 +15,7 @@
         "db:migrate": "prisma migrate deploy",
         "db:generate": "prisma generate",
         "reconcile:newsletter-orphan": "NODE_ENV=production bun dist/scripts/reconcile-newsletter-orphan.js",
-        "retention:newsletter": "NODE_ENV=production node --no-warnings dist/scripts/newsletter-retention.js",
+        "retention:newsletter": "NODE_ENV=production bun dist/scripts/newsletter-retention.js",
         "test": "runPrismaTests=false vitest",
         "test:prisma": "vitest --run tests/prisma-orm.test.ts",
         "test:run": "runPrismaTests=false vitest --run",
