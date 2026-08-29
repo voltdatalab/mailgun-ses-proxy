@@ -23,29 +23,31 @@ RUN DATABASE_URL=mysql://localhost:3306/dummy \
     NEWSLETTER_RETENTION_LINK_HELPER_PREBUILT=/usr/local/libexec/newsletter-retention-linkat \
     npm run build
 
-FROM oven/bun:1.3.6-alpine
+FROM oven/bun:1.3.6-alpine AS bun-runtime
+
+FROM node:22-alpine
 
 ENV NODE_ENV=production
 
-USER root
 RUN apk add --no-cache openssl
 
 WORKDIR /app
-RUN chown -R bun:bun /app
 
-USER bun
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-COPY --chown=bun:bun package.json package-lock.json bun.lock ./
-RUN bun install --frozen-lockfile
-
-COPY --chown=bun:bun . .
-COPY --from=application-builder --chown=bun:bun /app/.next /app/.next
-COPY --from=application-builder --chown=bun:bun /app/dist /app/dist
-COPY --from=application-builder --chown=bun:bun /app/lib/generated /app/lib/generated
+COPY . .
+COPY --from=application-builder /app/.next /app/.next
+COPY --from=application-builder /app/dist /app/dist
+COPY --from=application-builder /app/lib/generated /app/lib/generated
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=newsletter-retention-link-helper \
     /newsletter-retention-linkat \
     /usr/local/libexec/newsletter-retention-linkat
 
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 3000
 
-CMD ["bun", "run", "start:bun"]
+CMD ["npm", "run", "start"]
