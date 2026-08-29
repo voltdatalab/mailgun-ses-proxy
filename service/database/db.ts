@@ -1,4 +1,5 @@
 import { NotificationEvent } from "../../lib/core/aws-utils"
+import type { Prisma } from "../../lib/generated"
 import { safeStringify } from "../../lib/core/common"
 import { prisma } from "../../lib/database"
 import { MailgunMessage } from "../../types/mailgun"
@@ -79,6 +80,13 @@ function prepareNotificationData(event: NotificationEvent) {
     }
 }
 
+function prepareNotificationOrphanData(event: NotificationEvent) {
+    return {
+        ...prepareNotificationData(event),
+        reason: "missing_parent",
+    }
+}
+
 export function saveNewsletterNotification(event: NotificationEvent) {
     const data = prepareNotificationData(event)
     return prisma.newsletterNotifications.upsert({
@@ -86,6 +94,70 @@ export function saveNewsletterNotification(event: NotificationEvent) {
         create: data,
         update: data,
     })
+}
+
+export function saveNewsletterNotificationOrphan(event: NotificationEvent) {
+    const data = prepareNotificationOrphanData(event)
+    return prisma.newsletterNotificationOrphan.upsert({
+        where: { notificationId: event.notificationId },
+        create: data,
+        update: data,
+    })
+}
+
+export type NewsletterOrphanReconciliationResult = "absent" | "parent_missing" | "reconciled" | "already_reconciled"
+
+/**
+ * Explicit, exact-ID reconciliation for a newsletter event that was durably
+ * retained because its parent mapping was missing. This is deliberately not
+ * invoked from an SQS worker: operators choose when a restored mapping is
+ * eligible to be reconciled.
+ */
+export async function reconcileNewsletterNotificationOrphan(
+    notificationId: string,
+): Promise<NewsletterOrphanReconciliationResult> {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const orphan = await tx.newsletterNotificationOrphan.findUnique({
+            where: { notificationId },
+        })
+        if (!orphan) return "absent"
+        if (orphan.reconciledAt) return "already_reconciled"
+
+        const message = await tx.newsletterMessages.findUnique({
+            where: { messageId: orphan.messageId },
+            select: { id: true },
+        })
+        if (!message) return "parent_missing"
+
+        const data = {
+            messageId: orphan.messageId,
+            notificationId: orphan.notificationId,
+            rawEvent: orphan.rawEvent,
+            timestamp: orphan.timestamp,
+            type: orphan.type,
+        }
+        await tx.newsletterNotifications.upsert({
+            where: { notificationId: orphan.notificationId },
+            create: data,
+            update: data,
+        })
+        await tx.newsletterNotificationOrphan.update({
+            where: { id: orphan.id },
+            data: { reconciledAt: new Date() },
+        })
+        return "reconciled"
+    })
+}
+
+export function isNewsletterNotificationForeignKeyError(error: unknown) {
+    if (!error || typeof error !== "object") return false
+
+    const candidate = error as { code?: unknown, meta?: unknown }
+    if (candidate.code !== "P2003") return false
+    if (!candidate.meta || typeof candidate.meta !== "object") return false
+
+    const fieldName = (candidate.meta as { field_name?: unknown }).field_name
+    return typeof fieldName === "string" && fieldName.length > 0
 }
 
 export async function checkNewsletterAlreadySent(batchId: string, toEmail: string) {
