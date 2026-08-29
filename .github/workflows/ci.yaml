@@ -136,6 +136,46 @@ jobs:
           CI_DB_HOST: 127.0.0.1
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
+      - name: Smoke-test final image HTTP bootstrap contract
+        run: |
+          image=mailgun-ses-proxy-http-smoke
+          container=mailgun-ses-proxy-http-smoke-$RANDOM
+          response_file="$RUNNER_TEMP/$container.healthcheck.json"
+          docker build --file dockerfile --tag "$image" .
+          docker run --detach --name "$container" --network host \
+            --env DATABASE_URL=mysql://ci:ci-password@127.0.0.1:3306/mailgun_ci \
+            --env API_KEY=ci-api-key \
+            --env DASHBOARD_JWT_SECRET=ci-dashboard-session-signing-secret-not-for-production \
+            --env AWS_EC2_METADATA_DISABLED=true \
+            --env AWS_ACCESS_KEY_ID=ci-access-key \
+            --env AWS_SECRET_ACCESS_KEY=ci-secret-key \
+            --env SES_REGION=us-east-1 \
+            --env SQS_REGION=us-east-1 \
+            --env NEWSLETTER_QUEUE=https://sqs.us-east-1.amazonaws.com/000000000000/newsletter \
+            --env NEWSLETTER_NOTIFICATION_QUEUE=https://sqs.us-east-1.amazonaws.com/000000000000/newsletter-notifications \
+            --env TRANSACTIONAL_NOTIFICATION_QUEUE=https://sqs.us-east-1.amazonaws.com/000000000000/transactional-notifications \
+            --env PORT=3000 \
+            "$image"
+          docker exec "$container" node --version
+          docker exec "$container" bun --version
+          cleanup() { docker rm --force "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --max-time 3 http://127.0.0.1:3000/healthcheck || true)
+            if [ "$status" = 200 ] || [ "$status" = 503 ]; then
+              node -e "const fs=require('fs'); const health=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); const status=Number(process.argv[2]); const validReady=health.ready === true && ['ok','degraded'].includes(health.status); const validUnready=health.ready === false && health.status === 'unhealthy'; if ((status === 200 && !validReady) || (status === 503 && !validUnready) || (status !== 200 && status !== 503)) process.exit(1);" "$response_file" "$status"
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
+              echo 'final image exited before serving healthcheck; CI-only synthetic-runtime logs follow' >&2
+              docker logs --tail 50 "$container" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo 'final image did not serve a non-500 healthcheck within 30 seconds; CI-only synthetic-runtime logs follow' >&2
+          docker logs --tail 50 "$container" >&2 || true
+          exit 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ always() && hashFiles('artifacts/vitest-report.json') != '' }}
         with:
