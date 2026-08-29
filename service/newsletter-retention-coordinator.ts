@@ -2,13 +2,13 @@ import {
     NEWSLETTER_RETENTION_ESCROW_VERSION,
     type NewsletterRetentionEscrowHeader,
     type NewsletterRetentionEscrowVerificationResult,
-} from '@/service/newsletter-retention-escrow'
+} from './newsletter-retention-escrow.js'
 import {
     streamNewsletterRetentionEscrowRecords,
     type NewsletterRetentionEscrowLoaderDelegate,
-} from '@/service/newsletter-retention-escrow-loader'
-import { writeNewsletterRetentionEscrow } from '@/service/newsletter-retention-escrow-writer'
-import type { NewsletterRetentionCandidateLoaderRecord } from '@/service/newsletter-retention-candidate-loader'
+} from './newsletter-retention-escrow-loader.js'
+import { writeNewsletterRetentionEscrow } from './newsletter-retention-escrow-writer.js'
+import type { NewsletterRetentionCandidateLoaderRecord } from './newsletter-retention-candidate-loader.js'
 import {
     buildNewsletterRetentionManifest,
     parseNewsletterRetentionEvidence,
@@ -18,14 +18,14 @@ import {
     type NewsletterRetentionManifestInput,
     type NewsletterRetentionPolicy,
     type NewsletterRetentionPolicyInput,
-} from '@/service/newsletter-retention'
+} from './newsletter-retention.js'
 import {
     buildNewsletterRetentionSelectionPlan,
     createProcessLocalAntiOverlapLock,
     withProcessLocalAntiOverlapLock,
     type NewsletterRetentionSelectionPlan,
     type NewsletterRetentionSelectionPlanCandidateInput,
-} from '@/service/newsletter-retention-plan'
+} from './newsletter-retention-plan.js'
 
 export interface NewsletterRetentionDryRunCoordinatorInput {
     policy: NewsletterRetentionPolicyInput
