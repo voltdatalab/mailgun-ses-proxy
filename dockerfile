@@ -45,7 +45,9 @@ COPY --from=newsletter-retention-link-helper \
     /newsletter-retention-linkat \
     /usr/local/libexec/newsletter-retention-linkat
 
-RUN chown -R node:node /app
+# Docker copies this node-owned directory into a newly attached named volume.
+# The retention CLI rejects group/other-writable parents, so /tmp is not suitable.
+RUN mkdir -p /app/retention && chown -R node:node /app
 USER node
 
 EXPOSE 3000

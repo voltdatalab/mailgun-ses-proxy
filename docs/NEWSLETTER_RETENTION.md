@@ -14,7 +14,7 @@ Dry-run outputs use fail-closed, non-overwriting publication:
 
 A failure before publication closes the anonymous descriptor, so no partial pathname or sensitive temporary file remains. The production image builds the static helper in an isolated Alpine stage and installs it root-owned at `/usr/local/libexec/newsletter-retention-linkat`; production does not fall back to a shell command.
 
-The destination filesystem must support `O_TMPFILE`. The writable OverlayFS layer of a container, especially on the production Linux 5.15 host, must not be assumed to support it. Before promotion, provision and probe a dedicated bind mount or volume backed by a compatible filesystem for retention evidence. Lack of support aborts with a sanitized error and must not be bypassed with a named temporary file.
+The destination filesystem must support `O_TMPFILE`. The writable OverlayFS layer of a container, especially on the production Linux 5.15 host, must not be assumed to support it. Before promotion, provision and probe a dedicated bind mount or volume backed by a compatible filesystem for retention evidence. For the production image, attach the named volume at `/app/retention`: the image creates that directory as `node:node` before switching users, so Docker can initialize an empty volume with a secure, writable parent. Lack of support aborts with a sanitized error and must not be bypassed with a named temporary file.
 
 An existing output is accepted only as an idempotent retry when its regular-file type, owner, link count, exact mode, byte length, and complete byte content all match. Different or unsafe content aborts and is never overwritten or deleted.
 

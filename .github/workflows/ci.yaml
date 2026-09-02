@@ -37,6 +37,16 @@ jobs:
       - run: npm run build
       - run: npm run test:retention-link-helper
       - run: docker build --file dockerfile --tag mailgun-ses-proxy-ci .
+      - name: Smoke-test named retention evidence volume initialization
+        run: |
+          retention_volume="newsletter-retention-evidence-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
+          docker volume create "$retention_volume" >/dev/null
+          trap 'docker volume rm -f "$retention_volume" >/dev/null 2>&1 || true' EXIT
+          docker run --rm \
+            --mount "type=volume,source=$retention_volume,target=/app/retention" \
+            --entrypoint sh \
+            mailgun-ses-proxy-ci \
+            -c 'test "$(stat -c %U:%G /app/retention)" = node:node && test "$(stat -c %a /app/retention)" = 755 && test -w /app/retention && touch /app/retention/.write-probe && rm /app/retention/.write-probe'
       - name: Smoke-test final production image
         run: |
           evidence_root="$RUNNER_TEMP/newsletter-retention-link-helper"
