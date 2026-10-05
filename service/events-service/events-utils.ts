@@ -1,5 +1,6 @@
 import { EventsProps, QueryParams } from "@/types/default"
 import { formatAsMailgunEvent } from "../../lib/core/aws-utils"
+import { Prisma } from "../../lib/generated"
 import { prisma } from "../database/db"
 
 type EventsCursor = {
@@ -90,34 +91,52 @@ export async function getEmailEvents(params: EventsProps) {
     const cursor = params.cursor
     // This keyset is stable and duplicate-free only for a fixed result set; it is not cross-request snapshot isolation.
     // A concurrent insert at the cursor's exact created timestamp may sort behind a random UUID cursor and be recovered by polling/deduplication.
-    const seek = cursor && {
-        OR: params.order === "asc"
-            ? [
-                { created: { gt: new Date(cursor.created) } },
-                { created: new Date(cursor.created), id: { gt: cursor.id } },
-            ]
-            : [
-                { created: { lt: new Date(cursor.created) } },
-                { created: new Date(cursor.created), id: { lt: cursor.id } },
-            ],
-    }
+    const types = [...new Set(eventTypes(params.type))]
+    const direction = params.order === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`
+    const seek = cursor
+        ? params.order === "asc"
+            ? Prisma.sql`AND (n.created > ${new Date(cursor.created)} OR (n.created = ${new Date(cursor.created)} AND n.id > ${cursor.id}))`
+            : Prisma.sql`AND (n.created < ${new Date(cursor.created)} OR (n.created = ${new Date(cursor.created)} AND n.id < ${cursor.id}))`
+        : Prisma.empty
+    const offset = cursor ? 0 : params.start
+    const perTypeLimit = offset + params.limit
+    if (!Number.isSafeInteger(perTypeLimit)) fail("Invalid query parameter: start")
 
-    const result = await prisma.newsletterNotifications.findMany({
-        ...(cursor ? {} : { skip: params.start }),
-        take: params.limit,
-        orderBy: [{ created: params.order }, { id: params.order }],
-        include: {
-            newsletter: {
-                include: { newsletterBatch: true },
-            },
-        },
-        where: {
-            type: { in: eventTypes(params.type) },
-            newsletter: { newsletterBatch: { siteId: params.siteId } },
-            created: timeRange,
-            ...(seek ? { AND: [seek] } : {}),
-        },
-    })
+    // The (type, created, id) index is in the Prisma migration. A single type
+    // is naturally ordered; for OR types, take only the top offset+limit from
+    // each index range and merge those small ordered sets. Never sort the
+    // millions of joined notifications or require a prod-only created index.
+    const branch = (type: string) => Prisma.sql`
+        SELECT n.id, n.created
+        FROM NewsletterNotifications AS n FORCE INDEX (idx_notifications_type_created_id)
+        STRAIGHT_JOIN NewsletterMessages AS m ON m.messageId = n.messageId
+        STRAIGHT_JOIN NewsletterBatch AS b ON b.id = m.newsletterBatchId
+        WHERE n.type = ${type}
+          AND b.siteId = ${params.siteId}
+          AND n.created > ${timeRange.gt}
+          AND n.created < ${timeRange.lt}
+          ${seek}
+        ORDER BY n.created ${direction}, n.id ${direction}
+        LIMIT ${perTypeLimit}
+    `
+    const query = types.length === 1
+        ? Prisma.sql`SELECT /*+ MAX_EXECUTION_TIME(5000) */ q.id FROM (${branch(types[0])}) AS q ORDER BY q.created ${direction}, q.id ${direction} LIMIT ${params.limit} OFFSET ${offset}`
+        : Prisma.sql`
+            SELECT /*+ MAX_EXECUTION_TIME(5000) */ q.id
+            FROM (${Prisma.join(types.map(type => Prisma.sql`(${branch(type)})`), " UNION ALL ")}) AS q
+            ORDER BY q.created ${direction}, q.id ${direction}
+            LIMIT ${params.limit} OFFSET ${offset}
+        `
+    const ids = await prisma.$queryRaw<{ id: string }[]>(query)
+    const rows = ids.length ? await prisma.newsletterNotifications.findMany({
+        where: { id: { in: ids.map(row => row.id) } },
+        include: { newsletter: { include: { newsletterBatch: true } } },
+    }) : []
+    // Two separate reads: never silently return an incomplete page if a row
+    // disappears between them. A retry is safer than a skipped analytics event.
+    if (rows.length !== ids.length) throw new Error("Analytics event changed during pagination; retry the request")
+    const byId = new Map(rows.map(row => [row.id, row]))
+    const result = ids.map(row => byId.get(row.id)!)
 
     const last = result.at(-1)
     const nextCursor = last
