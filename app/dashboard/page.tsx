@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn, formatRelativeTime } from "@/lib/utils"
 import { AlertCircle, ArrowUpRight, CheckCircle2, Inbox, Loader2, Mail, RefreshCw, ShieldAlert, TrendingUp, Wifi, WifiOff } from "lucide-react"
+import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
 
 interface StatsData {
@@ -44,6 +45,7 @@ interface WorkerStatus {
 }
 
 export default function DashboardPage() {
+    const router = useRouter()
     const [stats, setStats] = useState<StatsData | null>(null)
     const [loading, setLoading] = useState(true)
     const [workers, setWorkers] = useState<WorkerStatus[]>([])
@@ -298,7 +300,7 @@ export default function DashboardPage() {
                     <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => (window.location.href = "/dashboard/newsletters")}
+                        onClick={() => router.push("/dashboard/newsletters")}
                     >
                         View All <ArrowUpRight className="ml-2 h-3 w-3" />
                     </Button>
