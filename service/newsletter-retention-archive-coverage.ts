@@ -87,7 +87,7 @@ export async function preflightNewsletterRetentionArchiveCoverage(input: Newslet
     clock(input.now)
     const policy = parseNewsletterRetentionPolicy(input.policy)
     if (!policy.dryRun) throw new Error('archive coverage apply integration is not enabled')
-    const artifact = parseNewsletterRetentionApplyArtifact(input.artifact)
+    parseNewsletterRetentionApplyArtifact(input.artifact)
     const proof = proofs.get(input.restoreProof)
     if (!proof) throw new Error('restore proof must originate from verified readback')
     fingerprint(input.expectedProcedureFingerprint)
@@ -96,8 +96,27 @@ export async function preflightNewsletterRetentionArchiveCoverage(input: Newslet
     if (proof.verification.schemaFingerprint !== input.expectedSchemaFingerprint) throw new Error('restore schema mismatch')
     if (timestamp(proof.restoredAt) > clock(input.now)) throw new Error('restore proof is in the future')
 
+    return verifyArchiveSelection(input, proof)
+}
+
+/** Preparation inspects coverage without promoting historical receipts to proof. */
+export async function verifyNewsletterRetentionArchiveSelection(
+    input: Omit<NewsletterRetentionArchiveCoverageInput, 'restoreProof' | 'expectedProcedureFingerprint'>,
+) {
+    exactKeys(input, ['now', 'policy', 'manifest', 'artifact', 'expectedSchemaFingerprint', 'archiveLines', 'liveLines', 'live'])
+    return verifyArchiveSelection(input)
+}
+
+async function verifyArchiveSelection(
+    input: Omit<NewsletterRetentionArchiveCoverageInput, 'restoreProof' | 'expectedProcedureFingerprint'>,
+    proof?: RestoreProofState,
+) {
+    const policy = parseNewsletterRetentionPolicy(input.policy)
+    if (!policy.dryRun) throw new Error('archive coverage apply integration is not enabled')
+    const artifact = parseNewsletterRetentionApplyArtifact(input.artifact)
     const archive = await verifyLines(input.archiveLines)
-    sameVerification(archive.verification, proof.verification)
+    if (archive.verification.schemaFingerprint !== input.expectedSchemaFingerprint) throw new Error('archive schema mismatch')
+    if (proof) sameVerification(archive.verification, proof.verification)
     sameVerification(archive.verification, artifact.escrow)
     // Reconstruct private identities AND per-batch counts from verified bytes.
     // Aggregate counts / a manifest hash alone cannot certify exact membership.
@@ -115,7 +134,7 @@ export async function preflightNewsletterRetentionArchiveCoverage(input: Newslet
     sameVerification(live.verification, archive.verification)
     // Refresh the trusted clock after potentially long archive/live streams.
     const now = clock(input.now)
-    if (timestamp(proof.restoredAt) > now) throw new Error('restore proof is in the future')
+    if (proof && timestamp(proof.restoredAt) > now) throw new Error('restore proof is in the future')
     exactKeys(input.live, ['coverageCheckedAt', 'queueCheckedAt', 'proxyCheckedAt', 'dlqCheckedAt', 'queueHealthy', 'proxyHealthy', 'dlqMessageCount', 'orphanCount'])
     for (const at of [input.live.coverageCheckedAt, input.live.queueCheckedAt, input.live.proxyCheckedAt, input.live.dlqCheckedAt]) {
         const age = now - timestamp(at)
@@ -130,7 +149,7 @@ export async function preflightNewsletterRetentionArchiveCoverage(input: Newslet
         artifactHash: rebuilt.hash,
         escrowContentHash: archive.verification.contentHash,
         schemaFingerprint: archive.verification.schemaFingerprint,
-        restoredAt: proof.restoredAt,
+        restoredAt: proof?.restoredAt ?? null,
         coverageCheckedAt: input.live.coverageCheckedAt,
     })
 }

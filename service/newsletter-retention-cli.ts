@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { prepareNewsletterRetentionHistoricalArchive, type NewsletterRetentionHistoricalPreparationSource, type NewsletterRetentionArchivePreparationDatabase } from './newsletter-retention-archive-preparation.js'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
@@ -68,6 +70,7 @@ export interface NewsletterRetentionCliDependencies {
     database: NewsletterRetentionCliDatabase
     createLockProvider(): NewsletterRetentionApplyLockProvider
     now(): Date
+    openHistoricalArchive?(): Promise<NewsletterRetentionHistoricalPreparationSource>
     schemaFingerprint(): string | Promise<string>
     writeEscrowFileExclusive(
         path: string,
@@ -108,9 +111,10 @@ export interface NewsletterRetentionCliApplyOutput {
     receipt: NewsletterRetentionApplyReceipt
 }
 
-export type NewsletterRetentionCliOutput = NewsletterRetentionCliDryRunOutput | NewsletterRetentionCliApplyOutput
+export type NewsletterRetentionCliOutput = NewsletterRetentionCliDryRunOutput | NewsletterRetentionCliApplyOutput | Awaited<ReturnType<typeof prepareNewsletterRetentionHistoricalArchive>>
 
 interface ParsedCliOptions {
+    prepareHistoricalArchive: boolean
     apply: boolean
     siteId: string
     cutoff: string
@@ -143,6 +147,40 @@ export async function executeNewsletterRetentionCli(
     const options = parseCliOptions(argv)
     const now = normalizeNow(dependencies.now())
     const rawEvidence = await dependencies.readJsonFile(options.evidenceFile, 'public')
+    if (options.prepareHistoricalArchive) {
+        if (!dependencies.openHistoricalArchive) throw new NewsletterRetentionCliError('historical archive trusted streaming source is not configured')
+        if (!isPlainObject(rawEvidence) || !isPlainObject(rawEvidence.health) || !isPlainObject(rawEvidence.dlq)) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        const unknownKeys = (value: Record<string, unknown>, allowed: string[]) => Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))
+        if (unknownKeys(rawEvidence, ['backup', 'restore', 'health', 'dlq'])
+            || unknownKeys(rawEvidence.health, ['queueCheckedAt', 'proxyCheckedAt', 'queueHealthy', 'proxyHealthy'])
+            || unknownKeys(rawEvidence.dlq, ['checkedAt', 'healthy', 'messageCount'])
+            || rawEvidence.dlq.healthy !== true) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        // Backup/restore receipt timestamps are NOT passed to legacy parsers or rewritten.
+        try {
+            return await prepareNewsletterRetentionHistoricalArchive({
+                policy: { siteId: options.siteId, cutoff: options.cutoff, maxBatches: options.maxBatches, maxMessages: options.maxMessages },
+                now: dependencies.now, schemaFingerprint: dependencies.schemaFingerprint,
+                database: dependencies.database as unknown as NewsletterRetentionArchivePreparationDatabase, lock: dependencies.createLockProvider(),
+                openArchive: dependencies.openHistoricalArchive,
+                live: async () => {
+                    const rawEvidence = await dependencies.readJsonFile(options.evidenceFile, 'public')
+        if (!isPlainObject(rawEvidence) || !isPlainObject(rawEvidence.health) || !isPlainObject(rawEvidence.dlq)) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        const unknownKeys = (value: Record<string, unknown>, allowed: string[]) => Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))
+        if (unknownKeys(rawEvidence, ['backup', 'restore', 'health', 'dlq'])
+            || unknownKeys(rawEvidence.health, ['queueCheckedAt', 'proxyCheckedAt', 'queueHealthy', 'proxyHealthy'])
+            || unknownKeys(rawEvidence.dlq, ['checkedAt', 'healthy', 'messageCount'])
+            || rawEvidence.dlq.healthy !== true) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+            return { queueCheckedAt: rawEvidence.health.queueCheckedAt as string, proxyCheckedAt: rawEvidence.health.proxyCheckedAt as string,
+                    dlqCheckedAt: rawEvidence.dlq.checkedAt as string, queueHealthy: rawEvidence.health.queueHealthy as boolean,
+                    proxyHealthy: rawEvidence.health.proxyHealthy as boolean, dlqMessageCount: rawEvidence.dlq.messageCount as number }
+                },
+            })
+        } catch (error) {
+            // Adapter errors contain only fixed labels, never payloads/identifiers.
+            if (error instanceof Error && /^(historical archive|archive |restore |live archive |newsletter retention command)/.test(error.message)) throw new NewsletterRetentionCliError(error.message)
+            throw new NewsletterRetentionCliError('historical archive preparation failed')
+        }
+    }
     const evidence = parseCliEvidence(rawEvidence, now)
     const policy = parseNewsletterRetentionPolicy({
         siteId: options.siteId,
@@ -194,6 +232,44 @@ export async function readNewsletterRetentionJsonFile(
     } finally {
         await handle?.close().catch(() => undefined)
         await parent?.handle.close().catch(() => undefined)
+    }
+}
+
+/** Acquire pinned metadata bytes from one bound private descriptor.
+ * Pinning proves byte identity ONLY, not who collected the Windows readback. */
+export async function readPinnedNewsletterRetentionOperationalReport(path: string, expectedSha256: string) {
+    if (!SHA_256_HEX.test(expectedSha256)) throw new NewsletterRetentionCliError('operational readback report pin invalid')
+    const normalizedPath = normalizeAbsolutePath(path, 'operational report')
+    let parent: BoundParentDirectory | null = null
+    let handle: Awaited<ReturnType<typeof open>> | null = null
+    try {
+        parent = await openBoundParentDirectory(normalizedPath)
+        handle = await open(parent.boundFilePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+        const identity = await readEscrowFileIdentity(handle)
+        if (identity.size > MAX_JSON_FILE_BYTES) throw new Error('report capacity')
+        const before = await handle.stat({ bigint: true })
+        const bytes = Buffer.alloc(identity.size + 1)
+        // A retained writable fd can mutate mode0400 files, sometimes within the
+        // filesystem timestamp tick. Re-read exact bytes as well as descriptor
+        // metadata; do not change the legacy escrow reader's guards/behavior.
+        for (let pass = 0; pass < 2; pass++) {
+            let position = 0
+            while (position < bytes.length) {
+                const { bytesRead } = await handle.read(bytes, position, bytes.length - position, position)
+                if (!bytesRead) break
+                position += bytesRead
+            }
+            await assertEscrowFileIdentity(handle, identity)
+            const after = await handle.stat({ bigint: true })
+            if (after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs
+                || position !== identity.size || createHash('sha256').update(bytes.subarray(0, position)).digest('hex') !== expectedSha256) throw new Error('report pin mismatch')
+        }
+        const report: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, identity.size)))
+        return Object.freeze({ report, reportSha256: expectedSha256, collectionAuthenticated: false as const })
+    } catch {
+        throw new NewsletterRetentionCliError('operational readback descriptor or byte pin invalid')
+    } finally {
+        try { await handle?.close() } finally { await parent?.handle.close() }
     }
 }
 
@@ -766,7 +842,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
     }
 
     const flags = new Map<string, string | true>()
-    const booleanFlags = new Set(['--apply'])
+    const booleanFlags = new Set(['--apply', '--prepare-historical-archive'])
     const valueFlags = new Set([
         '--site-id',
         '--cutoff',
@@ -811,6 +887,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
     const cutoff = requireStringFlag(flags, '--cutoff')
     const evidenceFile = requireAbsolutePathFlag(flags, '--evidence-file')
     const options: ParsedCliOptions = {
+        prepareHistoricalArchive: flags.get('--prepare-historical-archive') === true,
         apply,
         siteId,
         cutoff,
@@ -834,6 +911,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
 }
 
 function validateModeSpecificOptions(options: ParsedCliOptions): void {
+    if (options.prepareHistoricalArchive && (options.apply || options.manifestOut || options.privateArtifactOut || options.escrowOut)) throw new NewsletterRetentionCliError('historical archive preparation forbids apply and payload/artifact outputs')
     if (!options.apply) {
         if (
             options.manifestFile

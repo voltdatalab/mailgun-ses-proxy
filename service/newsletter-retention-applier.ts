@@ -1,3 +1,11 @@
+import { randomUUID } from 'node:crypto'
+import { adaptNewsletterRetentionHistoricalArchive, HISTORICAL_LIMITS } from './newsletter-retention-historical-archive.js'
+import { openNewsletterRetentionHistoricalArchiveStream } from './newsletter-retention-archive-stream-source.js'
+import { boundedHistoricalSource } from './newsletter-retention-historical-deadline.js'
+import { createHistoricalAcquisitionVerifier } from './newsletter-retention-historical-acquisition.js'
+import { operationalChainBinding } from './newsletter-retention-operational-readback.js'
+import { parseNewsletterRetentionPolicy } from './newsletter-retention.js'
+import { checkHistoricalGates, type HistoricalExecutorRoot, type HistoricalExecutorRequest, type HistoricalExecutorReceipt } from './newsletter-retention-historical-executor-contract.js'
 import {
     parseNewsletterRetentionEscrowRecord,
     parseNewsletterRetentionEscrowVerificationResult,
@@ -379,13 +387,34 @@ function assertExactEscrowBatchRecords(
     }
 }
 
+/** Test-only rehearsal seam into the SAME child-first transactional core.
+ * Not admission: not wired to runtime/CLI; rejects non-test runtime entry.
+ * A production historical
+ * executor remains disabled until independent provenance and review exist. */
+export async function recheckAndApplyNewsletterRetentionArchiveBatchForFixture(
+    tx: NewsletterRetentionApplyTransactionClient & { newsletterBatch: { findMany(args: { where: { batchId: string }; select: { id: true }; take: number }): Promise<Array<{ id: string }>> } },
+    context: NewsletterRetentionApplyContext,
+    expectedRecords: readonly NewsletterRetentionEscrowRecord[],
+): Promise<NewsletterRetentionApplyReceiptBatch> {
+    if (process.env.NODE_ENV !== 'test') throw new Error('historical archive apply admission is not enabled')
+    if (context.artifact.bindings.length !== 1 || context.manifest.batches.length !== 1) throw new Error('historical archive fixture requires one complete group')
+    const binding = context.artifact.bindings[0]
+    const batch = context.manifest.batches[binding.manifestIndex]
+    if (!batch || binding.manifestIndex !== 0) throw new Error('historical archive fixture binding invalid')
+    const parents = await tx.newsletterBatch.findMany({ where: { batchId: batch.batchId }, select: { id: true }, take: 2 })
+    if (parents.length !== 1 || parents[0].id !== binding.batchRecordId) throw new Error('historical archive transactional parent set mismatch')
+    return applyNewsletterRetentionBatch(tx, context, 0, batch, binding.batchRecordId, expectedRecords)
+}
+
 async function applyNewsletterRetentionBatch(
     tx: NewsletterRetentionApplyTransactionClient,
-    context: NewsletterRetentionApplyContext,
+    context: Pick<NewsletterRetentionApplyContext, 'policy' | 'manifest' | 'artifact'>,
     manifestIndex: number,
     manifestBatch: NewsletterRetentionApplyContext['manifest']['batches'][number],
     batchRecordId: string,
     expectedRecords: readonly NewsletterRetentionEscrowRecord[],
+    beforeMutation?: () => void | Promise<void>,
+    validateActualRecord?: (record: NewsletterRetentionEscrowRecord) => void,
 ): Promise<NewsletterRetentionApplyReceiptBatch> {
     const candidate = {
         siteId: context.manifest.siteId,
@@ -400,6 +429,7 @@ async function applyNewsletterRetentionBatch(
     }
     const actualRecords: NewsletterRetentionEscrowRecord[] = []
     for await (const record of streamNewsletterRetentionEscrowRecords(tx, context.policy, [candidate])) {
+        validateActualRecord?.(record)
         actualRecords.push({ ...record, manifestIndex })
     }
     assertExactEscrowBatchRecords(actualRecords, expectedRecords)
@@ -415,6 +445,7 @@ async function applyNewsletterRetentionBatch(
 
     let deletedNotificationCount = 0
     if (messageIds.length > 0) {
+        if (beforeMutation) await beforeMutation()
         deletedNotificationCount = await deleteAndValidateCount(
             tx.newsletterNotifications.deleteMany({ where: { messageId: { in: messageIds } } }),
             manifestBatch.notificationCount,
@@ -422,16 +453,19 @@ async function applyNewsletterRetentionBatch(
         )
     }
 
+    if (beforeMutation) await beforeMutation()
     const deletedErrorCount = await deleteAndValidateCount(
         tx.newsletterErrors.deleteMany({ where: { newsletterBatchId: parent.id } }),
         manifestBatch.errorCount,
         'newsletterErrors.deleteMany',
     )
+    if (beforeMutation) await beforeMutation()
     const deletedMessageCount = await deleteAndValidateCount(
         tx.newsletterMessages.deleteMany({ where: { newsletterBatchId: parent.id } }),
         manifestBatch.messageCount,
         'newsletterMessages.deleteMany',
     )
+    if (beforeMutation) await beforeMutation()
     const deletedBatchCount = await deleteAndValidateCount(
         tx.newsletterBatch.deleteMany({
             where: {
@@ -493,6 +527,134 @@ function safeAddIntegers(left: number, right: number, field: string): number {
     }
 
     return left + right
+}
+
+/** Internal composition API; no runtime/CLI controller is wired. The application
+ * root must provision ALL ports/key/approval independently of request metadata.
+ * The only positive capability is private identity created after connected stream
+ * verification + authenticated acquisition + exact independent wave authorization. */
+export function createInternalHistoricalRetentionExecutor(provided: HistoricalExecutorRoot) {
+    if (!provided?.acquisitionRoot || !provided.approval || !provided.gates || !provided.database || !provided.postcommit?.read) throw new Error('historical trusted adapters not configured')
+    for (const key of ['ghost', 'queues', 'proxy', 'pressure', 'schema', 'correlation'] as const) {
+        if (typeof provided.gates[key] !== 'function') throw new Error('historical trusted gate adapter missing')
+    }
+    const root: HistoricalExecutorRoot = {
+        ...provided, binding: structuredClone(provided.binding), policy: structuredClone(provided.policy), approval: structuredClone(provided.approval),
+        acquisitionRoot: { ...provided.acquisitionRoot }, queueIds: [...provided.queueIds], gates: {
+            ghost: provided.gates.ghost.bind(provided.gates), queues: provided.gates.queues.bind(provided.gates),
+            proxy: provided.gates.proxy.bind(provided.gates), pressure: provided.gates.pressure.bind(provided.gates),
+            schema: provided.gates.schema.bind(provided.gates), correlation: provided.gates.correlation.bind(provided.gates),
+        },
+        lock: { tryAcquire: provided.lock.tryAcquire.bind(provided.lock) },
+        database: { $transaction: provided.database.$transaction.bind(provided.database) },
+        postcommit: { read: provided.postcommit.read.bind(provided.postcommit) },
+    }
+    if (root.policy.apply === true || root.approval.policy.apply === true || !Number.isSafeInteger(root.maxGateAgeMs) || root.maxGateAgeMs <= 0 || root.maxGateAgeMs > 900_000
+        || !Number.isSafeInteger(root.maxPressure) || root.maxPressure < 0 || root.maxPressure > 100
+        || root.queueIds.length < 2 || new Set(root.queueIds).size !== root.queueIds.length || root.queueIds.some(id => !id)) throw new Error('historical trusted root limits invalid')
+    // Independent policy approval must pin BOTH domains; never derive SQL from Prisma.
+    const approvedSchema = root.approval.schema
+    if (!approvedSchema || !/^[a-f0-9]{64}$/.test(approvedSchema.expectedSqlDatabaseFingerprint)
+        || !/^[a-f0-9]{64}$/.test(approvedSchema.expectedPrismaFileFingerprint)
+        || approvedSchema.expectedSqlDatabaseFingerprint !== root.acquisitionRoot.expectedSqlDatabaseFingerprint
+        || approvedSchema.expectedPrismaFileFingerprint !== root.acquisitionRoot.expectedPrismaFileFingerprint
+        || approvedSchema.expectedPrismaFileFingerprint !== root.binding.schemaFingerprint
+        || approvedSchema.expectedPrismaFileFingerprint !== root.approval.expected.schemaFingerprint) throw new Error('historical approved schema commitments invalid')
+    const policy = parseNewsletterRetentionPolicy(root.policy)
+    const verifyAcquisition = createHistoricalAcquisitionVerifier(root.acquisitionRoot)
+    const capabilities = new WeakMap<object, { selected: Awaited<ReturnType<typeof adaptNewsletterRetentionHistoricalArchive>>; authentication: ReturnType<typeof verifyAcquisition>; binding: HistoricalExecutorRoot['binding']; policy: typeof policy; approval: HistoricalExecutorRoot['approval'] }>()
+    let waveConsumed = false
+    return async (request: HistoricalExecutorRequest): Promise<HistoricalExecutorReceipt> => {
+        const receipt: HistoricalExecutorReceipt = { version: 1, state: 'refused_before_transaction', stage: 'lock', cleanupFailures: [] }
+        let lease: NewsletterRetentionApplyLockLease | null = null
+        let source: Awaited<ReturnType<typeof openNewsletterRetentionHistoricalArchiveStream>> | null = null
+        let work: ReturnType<typeof boundedHistoricalSource> | null = null
+        const attemptId = randomUUID()
+        let transactionEntered = false
+        try {
+            if (!request || Object.keys(request).some(k => !['stream', 'acquisition', 'deadlines'].includes(k)) || waveConsumed) return receipt
+            lease = await root.lock.tryAcquire(NEWSLETTER_RETENTION_APPLY_LOCK_KEY)
+            if (!lease || waveConsumed) return receipt
+            receipt.stage = 'stream'
+            work = boundedHistoricalSource(request.stream, request.deadlines)
+            source = await openNewsletterRetentionHistoricalArchiveStream(work, { ...root.binding, expectedProcedureFingerprint: root.acquisitionRoot.procedureFingerprint }, { ...request.deadlines, signal: work.signal })
+            const selected = await adaptNewsletterRetentionHistoricalArchive(source.chain, source.binding, root.policy, {}, { ...request.deadlines, signal: work.signal })
+            work.check()
+            receipt.stage = 'admission'
+            const expected = root.approval.expected
+            const derived = { ...operationalChainBinding(root.binding), procedureFingerprint: root.acquisitionRoot.procedureFingerprint,
+                manifestHash: selected.manifest.hash, artifactHash: selected.artifact.hash,
+                counts: { B: 1, M: selected.candidate.messageCount, E: selected.candidate.errorCount, N: selected.candidate.notificationCount }, setSha256: selected.readbackDigests }
+            // Complete chain/selection/policy comparison, never caller flags or report.matches.
+            for (const [key, value] of Object.entries(derived)) {
+                const wanted = expected[key as keyof typeof expected]
+                if (typeof value === 'object' ? Object.entries(value).some(([k, v]) => (wanted as Record<string, unknown>)?.[k] !== v) : wanted !== value) throw new Error('historical wave binding mismatch')
+            }
+            if (JSON.stringify(policy) !== JSON.stringify(parseNewsletterRetentionPolicy(root.approval.policy))) throw new Error('historical wave policy mismatch')
+            const authentication = verifyAcquisition(request.acquisition, expected, root.now())
+            // Synchronous authenticated check-and-set before any gate/capability;
+            // never return approval after gate failure or an unknown DB outcome.
+            if (waveConsumed) return receipt
+            waveConsumed = true
+            const recipients = selected.records.flatMap(record => record.kind === 'newsletterMessages' ? [record.row.toEmail] : [])
+            const gateRequest = Object.freeze({ artifactHash: selected.artifact.hash, batchGroupSha256: root.binding.batchGroupSha256, attemptId, signal: work.signal })
+            receipt.stage = 'gates'
+            await checkHistoricalGates(root, gateRequest, recipients)
+            work.check()
+            const capability = Object.freeze({})
+            capabilities.set(capability, { selected, authentication, binding: root.binding, policy, approval: root.approval })
+            receipt.manifestHash = selected.manifest.hash
+            receipt.artifactHash = selected.artifact.hash
+            receipt.stage = 'transaction'
+            transactionEntered = true
+            let callbackResult: NewsletterRetentionApplyReceiptBatch | null = null
+            const result = await root.database.$transaction(async tx => {
+                const admitted = capabilities.get(capability)
+                capabilities.delete(capability)
+                if (!admitted || admitted.selected !== selected || admitted.authentication !== authentication) throw new Error('historical capability invalid or consumed')
+                work!.check()
+                await checkHistoricalGates(root, gateRequest, recipients)
+                const binding = selected.artifact.bindings[0], batch = selected.manifest.batches[0]
+                const parents = await tx.newsletterBatch.findMany({ where: { batchId: batch.batchId }, select: { id: true }, take: 2 })
+                if (parents.length !== 1 || parents[0].id !== binding.batchRecordId) throw new Error('historical exact parent set changed')
+                let actualBytes = 0, actualRows = 0
+                callbackResult = await applyNewsletterRetentionBatch(tx, { policy, manifest: selected.manifest, artifact: selected.artifact }, 0, batch, binding.batchRecordId, selected.records, async () => {
+                    work!.check()
+                    await checkHistoricalGates(root, gateRequest, recipients)
+                    work!.check()
+                }, record => {
+                    work!.check()
+                    actualBytes += Buffer.byteLength(JSON.stringify(record.row))
+                    if (++actualRows > HISTORICAL_LIMITS.selectionRows || actualBytes > HISTORICAL_LIMITS.selectionBytes) throw new Error('historical live selection capacity exceeded')
+                })
+                work!.check()
+                return callbackResult
+            }, { isolationLevel: 'Serializable', attemptId })
+            if (!callbackResult || result !== callbackResult) throw new Error('historical transaction adapter result unconfirmed')
+            // Resolved transaction => committed. Nothing below can report rollback.
+            receipt.state = 'committed_readback_failed'
+            receipt.stage = 'postcommit'
+            receipt.deleted = { batches: result.deletedBatchCount, messages: result.deletedMessageCount, errors: result.deletedErrorCount, notifications: result.deletedNotificationCount }
+            const remaining = await root.postcommit.read({ attemptId, batchId: selected.candidate.batchId, batchRecordId: selected.candidate.batchRecordId,
+                messageIds: selected.records.flatMap(record => record.kind === 'newsletterMessages' ? [record.row.messageId] : []), artifactHash: selected.artifact.hash })
+            const keys = ['parents', 'messages', 'errors', 'notifications', 'orphans', 'lateEvents']
+            if (remaining && Object.keys(remaining).length === keys.length && keys.every(key => remaining[key as keyof typeof remaining] === 0)) receipt.state = 'committed_readback_ok'
+        } catch {
+            if (transactionEntered && receipt.state === 'refused_before_transaction') {
+                receipt.state = 'commit_unknown'
+                try {
+                    const confirmation = await root.confirmRollback?.(attemptId)
+                    if (confirmation?.attemptId === attemptId && confirmation.outcome === 'rollback_confirmed') receipt.state = 'rollback_confirmed'
+                } catch { /* Outcome remains unknown. A rejected generic transaction is not rollback proof. */ }
+            }
+        } finally {
+            try { await source?.close() } catch { receipt.cleanupFailures.push('source_cleanup_failed') }
+            try { await work?.close() } catch { receipt.cleanupFailures.push('source_cleanup_failed') }
+            if (work?.cleanupIncomplete && !receipt.cleanupFailures.includes('source_cleanup_failed')) receipt.cleanupFailures.push('source_cleanup_failed')
+            try { await lease?.release() } catch { receipt.cleanupFailures.push('lock_release_failed') }
+        }
+        return receipt
+    }
 }
 
 async function deleteAndValidateCount(result: Promise<{ count: number }>, expected: number, field: string): Promise<number> {
