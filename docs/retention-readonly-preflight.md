@@ -61,3 +61,24 @@ node scripts/test-newsletter-retention-safe-filesystem.mjs tests/service/newslet
 ```
 
 Local namespace filesystem verification is synthetic/offline, **not Node22/MySQL/MariaDB certification**. The local one-UID runner cannot create foreign-owned files (chown EINVAL); mandatory foreign-owner coverage is not weakened or claimed. Broader actual CI baseline remains parent-verified eight cases on MySQL8.0.46/MariaDB11.4.13 at the previous exact head. No commit, push, deployment, production read/write, restore, key provisioning, ACL/policy change or apply enablement occurred here.
+
+### CI run 37813787103: positive fixture temporary-directory correction
+
+The quality log and both raw database Vitest reports identify the positive secure-descriptor fixture as failing before metadata acquisition: `join(process.env.TMPDIR!, ...)` received `undefined` in the minimal environment. Both database raw reports contain **840 passed, 1 failed, 22 pending / 863 tests**. This is failed execution, not pending coverage eligible for reconciliation; no aggregate certification follows from it.
+
+Only the test fixture now uses `node:os.tmpdir()`: it honors an explicit local `TMPDIR` and supports the standard temporary base when CI omits it. The reader, ancestry checks, mode0700 fixture directory, mode0400 metadata files, negative hash test and cleanup remain unchanged. No runtime allocator, environment propagation, gate exception, skip or ownership-policy change was added.
+
+Bounded TDD reproduced the exact TypeError with the entire 26-test suite in a disposable unprivileged chroot: the child environment omitted `TMPDIR`, and `/tmp` was a mode1777 directory **inside the scratch-local fixture**, not the host `/tmp`. RED: **25 passed / 1 failed**. With the fixture correction the same invocation returned GREEN: **26 passed / 0 failed**, including the real consuming command's authenticated descriptor read and its incorrect-hash refusal. The unchanged private runner with explicit `/scratch` also returned **26 passed / 0 failed**. Neither invocation used test-name filters or skips. The local foreign-owner capability probe still reports EINVAL and is not claimed as successful coverage.
+
+The scratch-only unset-environment runner is an adaptation of `scripts/test-newsletter-retention-safe-filesystem.mjs`: it creates its own chroot `/tmp` and removes `TMPDIR` only from the isolated child's environment. Parent `TMPDIR` stays explicit. Reproduction commands and logs live under the active profile's scratch directory:
+
+```sh
+node "$TMPDIR/ses-readonly-unset-runner.mjs" tests/service/newsletter-retention-readonly-preflight.test.ts
+node scripts/test-newsletter-retention-safe-filesystem.mjs tests/service/newsletter-retention-readonly-preflight.test.ts
+node --test tests/scripts/retention-readonly-preflight.node.mjs
+npm run typecheck
+npm run lint
+git diff --check
+```
+
+Static import-graph/compiled minimal-environment tests: **2 passed**. Both TypeScript projects, full zero-warning lint and diff check passed. These results correct the local fixture boot failure only; they do **not** certify a new hosted run, database aggregate, dependency audit or production readiness. The actual operational root remains unprovisioned and the external prerequisites above remain missing.

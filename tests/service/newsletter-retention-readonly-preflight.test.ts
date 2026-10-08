@@ -3,6 +3,7 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import { HISTORICAL_ACQUISITION_DOMAIN } from '../../service/newsletter-retention-historical-acquisition'
 import { chmod, mkdtemp, writeFile, rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { createHistoricalReadOnlyPreflight, executeHistoricalPreflightCommand, type HistoricalPreflightRoot } from '../../service/newsletter-retention-readonly-preflight'
 import { chunks, fixedRows, frame, hash, signedFixture, type Tag } from './newsletter-retention-historical-ci-fixture'
 
@@ -150,7 +151,9 @@ describe('connected READ ONLY acquisition/preflight (synthetic, not SQL certific
     })
     it('actual secure descriptor command reads pinned raw metadata, authenticates and returns safe result', async () => {
         const { f, root } = await fixture()
-        const dir = await mkdtemp(join(process.env.TMPDIR!, 'preflight-'))
+        // Minimal CI environments may omit TMPDIR; tmpdir() still honors it
+        // in local private runners, without changing the secure reader's guards.
+        const dir = await mkdtemp(join(tmpdir(), 'preflight-'))
         await chmod(dir, 0o700)
         const env: NodeJS.ProcessEnv = { NODE_ENV: 'test' }
         try {
