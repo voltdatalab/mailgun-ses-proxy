@@ -5,6 +5,7 @@ import { PrismaMariaDb } from '@prisma/adapter-mariadb'
 import { PrismaClient } from '../../lib/generated'
 import { test } from 'vitest'
 import { assertHistoricalCiTarget, historicalNativeConnectionOptions } from '../../scripts/test-retention-historical-db.mjs'
+import { serializeHistoricalCatalogRows } from '../../scripts/retention-historical-catalog.mjs'
 import { createInternalHistoricalRetentionExecutor } from '../../service/newsletter-retention-applier'
 import type { HistoricalExecutorRoot, HistoricalTransaction } from '../../service/newsletter-retention-historical-executor-contract'
 import { chunks, fixedRows, signedFixture, frame, hash, type Row, type Tag } from '../service/newsletter-retention-historical-ci-fixture'
@@ -50,7 +51,7 @@ async function cleanup(native: Connection, fixtures: Snapshot) {
 async function catalogFingerprint(native: Connection) {
     const rows = await native.query('SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?, ?, ?, ?, ?) ORDER BY TABLE_NAME, ORDINAL_POSITION', [...TABLES])
     assert.ok(rows.length > 0)
-    return hash(JSON.stringify(Array.from(rows)))
+    return hash(serializeHistoricalCatalogRows(rows))
 }
 async function counts(native: Connection, rows: ReturnType<typeof fixedRows>, since: string) {
     const count = async (sql: string, values: (string | null)[]) => {
