@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import { runSafeNamespace } from './retention-safe-subprocess.mjs'
 import { probeBootstrapTeardown } from './retention-ci-teardown.mjs'
 import { validateSafeRunnerMode } from './retention-safe-runner-policy.mjs'
+import { assertMappedScratchAncestry } from './retention-ci-scratch.mjs'
 const args = process.argv.slice(2)
 const multiUid = args[0] === '--ci-multi-uid'
 if (multiUid) args.shift()
@@ -18,6 +19,7 @@ if (args[0] === '--report-file') {
 }
 const userArgs = validateSafeRunnerMode({ multiUid, uid: process.getuid(), githubActions: process.env.GITHUB_ACTIONS, runnerEnvironment: process.env.RUNNER_ENVIRONMENT })
 if (!process.env.TMPDIR) throw new Error('TMPDIR required; no system-temp fallback')
+if (multiUid) await assertMappedScratchAncestry(resolve(process.env.TMPDIR))
 const fixture = await mkdtemp(join(process.env.TMPDIR, 'ses-safe-'))
 await chmod(fixture, 0o700)
 let copiedBytes = 0, copiedFiles = 0, copiedDirectories = 0

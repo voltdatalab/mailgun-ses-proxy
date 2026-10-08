@@ -14,8 +14,8 @@ export function runDatabaseCoverage(runPhase = run) {
     // This is the only privileged bootstrap, only in ephemeral hosted CI. Tests run
     // after chroot in a private offline user namespace with exactly UID/GID 0 and 1.
     // No Docker, host mounts, sysctl changes, ancestor chmod or production payloads.
-    const safeStatus = runPhase('sudo', ['-n', 'env', '-i', 'PATH=/usr/bin:/bin', `TMPDIR=${process.env.RUNNER_TEMP}`, 'GITHUB_ACTIONS=true', 'RUNNER_ENVIRONMENT=github-hosted',
-        process.execPath, 'scripts/test-newsletter-retention-safe-filesystem.mjs', '--ci-multi-uid', '--report-file', 'artifacts/vitest-safe-report.json',
+    const safeStatus = runPhase('sudo', ['-n', 'env', '-i', 'PATH=/usr/bin:/bin', 'GITHUB_ACTIONS=true', 'RUNNER_ENVIRONMENT=github-hosted',
+        process.execPath, 'scripts/retention-ci-scratch.mjs', '--ci-multi-uid', '--report-file', 'artifacts/vitest-safe-report.json',
         'tests/service/newsletter-retention-operational-filesystem.test.ts', 'tests/service/newsletter-retention-historical-preparation.test.ts'])
     const safeGate = runPhase(process.execPath, ['scripts/assert-vitest-report.mjs', 'artifacts/vitest-safe-report.json'])
     const mergeStatus = runPhase(process.execPath, ['scripts/merge-retention-vitest-reports.mjs', 'artifacts/vitest-db-report.json', 'artifacts/vitest-safe-report.json', 'artifacts/vitest-report.json'])
@@ -27,7 +27,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // Required DB jobs keep the entire ordinary suite. Only exact safe-only pending
     // identities may be reconciled against a second, offline real-filesystem run.
     if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('required DB coverage requires an ephemeral GitHub-hosted runner')
-    if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP required')
     await mkdir('artifacts', { recursive: true })
     for (const name of ['vitest-db-report.json', 'vitest-safe-report.json', 'vitest-report.json']) await rm(`artifacts/${name}`, { force: true })
     process.exitCode = runDatabaseCoverage()
