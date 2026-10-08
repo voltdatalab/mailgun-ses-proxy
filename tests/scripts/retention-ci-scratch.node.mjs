@@ -3,9 +3,33 @@ import assert from 'node:assert/strict'
 import { mkdtemp, lstat, rm, mkdir, writeFile, chmod, readFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { runPrivateCiScratch, assertMappedScratchAncestry } from '../../scripts/retention-ci-scratch.mjs'
+import { runPrivateCiScratch, runPrivateCiSafeRunner, assertMappedScratchAncestry } from '../../scripts/retention-ci-scratch.mjs'
 import { runDatabaseCoverage } from '../../scripts/test-ci-db.mjs'
 
+test('actual allocator safe caller uses only curated system PATH and explicit environment', async () => {
+    const args = ['--ci-multi-uid', '--report-file', 'artifacts/vitest-safe-report.json', 'tests/service/newsletter-retention-ci-reports.test.ts']
+    assert.equal(runPrivateCiSafeRunner('/run/ses-retention-ci-own', args, (command, forwarded, env) => {
+        assert.equal(command, process.execPath)
+        assert.deepEqual(forwarded, ['scripts/test-newsletter-retention-safe-filesystem.mjs', ...args])
+        assert.deepEqual(env, { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', TMPDIR: '/run/ses-retention-ci-own', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' })
+        return 17
+    }), 17)
+    const allocator = await readFile('scripts/retention-ci-scratch.mjs', 'utf8')
+    assert.match(allocator, /runPrivateCiScratch\(scratch => runPrivateCiSafeRunner\(scratch, process.argv.slice\(2\)\)\)/)
+})
+test('real shell resolves exec chroot under actual safe caller environment without root', () => {
+    assert.notEqual(process.getuid(), 0, 'version diagnostic must be unprivileged')
+    runPrivateCiSafeRunner('/run/ses-retention-ci-own', ['--ci-multi-uid'], (_command, _args, env) => {
+        // Same bare exec lookup as the live namespace shell; --version performs
+        // no chroot, namespace operation or filesystem mutation.
+        const result = spawnSync('/bin/sh', ['-c', 'exec chroot --version'], { env, encoding: 'utf8', timeout: 2000, killSignal: 'SIGKILL' })
+        assert.equal(result.error, undefined)
+        assert.equal(result.signal, null)
+        assert.equal(result.status, 0, result.stderr)
+        assert.match(result.stdout, /^chroot \(GNU coreutils\)/)
+        return 0
+    })
+})
 const directory = (uid = 0, gid = 0, mode = 0o40755) => ({ uid, gid, mode, isDirectory: () => true })
 test('bounded maps reject runner-owned restrictive ancestry before launch', async () => {
     await assert.rejects(assertMappedScratchAncestry('/runner/private', async path => path === '/runner' ? directory(1001, 1001, 0o40700) : directory()), /mapped scratch ancestry/)

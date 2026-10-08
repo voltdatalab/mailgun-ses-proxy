@@ -29,9 +29,13 @@ export async function runPrivateCiScratch(launch, operations = { mkdtemp, lstat,
         return await launch(scratch)
     } finally { await operations.rm(scratch, { recursive: true, force: true }) }
 }
+export function runPrivateCiSafeRunner(scratch, args, runChild = run) {
+    // chroot is a system sbin tool. Keep lookup explicit; never inherit ambient PATH.
+    return runChild(process.execPath, [
+        'scripts/test-newsletter-retention-safe-filesystem.mjs', ...args,
+    ], { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', TMPDIR: scratch, GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' })
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     validateSafeRunnerMode({ multiUid: true, uid: process.getuid(), githubActions: process.env.GITHUB_ACTIONS, runnerEnvironment: process.env.RUNNER_ENVIRONMENT })
-    process.exitCode = await runPrivateCiScratch(scratch => run(process.execPath, [
-        'scripts/test-newsletter-retention-safe-filesystem.mjs', ...process.argv.slice(2),
-    ], { PATH: '/usr/bin:/bin', TMPDIR: scratch, GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' }))
+    process.exitCode = await runPrivateCiScratch(scratch => runPrivateCiSafeRunner(scratch, process.argv.slice(2)))
 }
