@@ -40,8 +40,8 @@ function assertPositiveHistoricalReadback(raw: Record<string, unknown>) {
 export function createHistoricalAcquisitionVerifier(root: HistoricalAcquisitionTrustRoot) {
     const pinned = Object.freeze({ ...root })
     const key = createPublicKey(pinned.publicKeyPem)
-    if (key.asymmetricKeyType !== 'ed25519' || !pinned.collectorId || !/^[a-f0-9]{64}$/.test(pinned.procedureFingerprint)
-        || !/^[a-f0-9]{64}$/.test(pinned.expectedSqlDatabaseFingerprint) || !/^[a-f0-9]{64}$/.test(pinned.expectedPrismaFileFingerprint) || !Number.isSafeInteger(pinned.maxAgeMs) || pinned.maxAgeMs <= 0 || pinned.maxAgeMs > 86_400_000) throw new Error('historical acquisition trust root invalid')
+    if (key.asymmetricKeyType !== 'ed25519' || typeof pinned.collectorId !== 'string' || !pinned.collectorId
+        || [pinned.procedureFingerprint, pinned.expectedSqlDatabaseFingerprint, pinned.expectedPrismaFileFingerprint].some(v => typeof v !== 'string' || !/^[a-f0-9]{64}$/.test(v)) || !Number.isSafeInteger(pinned.maxAgeMs) || pinned.maxAgeMs <= 0 || pinned.maxAgeMs > 86_400_000) throw new Error('historical acquisition trust root invalid')
     return (input: HistoricalAcquisitionEnvelope, expected: HistoricalOperationalBinding, now: Date) => {
         for (const bytes of [input.reportBytes, input.configBytes, input.attestationBytes]) {
             if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > 1_048_576) throw new Error('historical acquisition byte capacity')

@@ -61,7 +61,7 @@ export function recipientCommitment(recipients: readonly string[]) {
         || new Set(recipients).size !== recipients.length) throw new Error('historical recipient set invalid')
     return { count: recipients.length, digest: createHash('sha256').update(JSON.stringify([...recipients].sort())).digest('hex') }
 }
-export async function checkHistoricalGates(root: HistoricalExecutorRoot, request: HistoricalGateRequest, expectedRecipients: readonly string[]) {
+export async function checkHistoricalGates(root: Pick<HistoricalExecutorRoot, 'now' | 'gates' | 'queueIds' | 'maxGateAgeMs' | 'maxPressure' | 'approval'>, request: HistoricalGateRequest, expectedRecipients: readonly string[]) {
     if (request.signal.aborted) throw new Error('historical executor cancelled')
     const observations = await Promise.all([
         Promise.resolve().then(() => root.gates.ghost(request)), Promise.resolve().then(() => root.gates.queues(request)),

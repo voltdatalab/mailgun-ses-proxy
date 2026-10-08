@@ -34,7 +34,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - name: Regression-test CI subprocess failures and bounded cleanup
-        run: node --test tests/scripts/retention-ci-processes.node.mjs tests/scripts/retention-ci-userns.node.mjs tests/scripts/retention-ci-teardown.node.mjs tests/scripts/retention-ci-scratch.node.mjs tests/scripts/retention-historical-db.node.mjs tests/scripts/retention-historical-db-report.node.mjs
+        run: node --test tests/scripts/retention-ci-processes.node.mjs tests/scripts/retention-ci-userns.node.mjs tests/scripts/retention-ci-teardown.node.mjs tests/scripts/retention-ci-scratch.node.mjs tests/scripts/retention-historical-db.node.mjs tests/scripts/retention-historical-db-report.node.mjs tests/scripts/retention-readonly-preflight.node.mjs
         env:
           TMPDIR: ${{ runner.temp }}
       - run: npm run test:run

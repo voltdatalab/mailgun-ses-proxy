@@ -3,7 +3,7 @@ import { adaptNewsletterRetentionHistoricalArchive, HISTORICAL_LIMITS } from './
 import { openNewsletterRetentionHistoricalArchiveStream } from './newsletter-retention-archive-stream-source.js'
 import { boundedHistoricalSource } from './newsletter-retention-historical-deadline.js'
 import { createHistoricalAcquisitionVerifier } from './newsletter-retention-historical-acquisition.js'
-import { operationalChainBinding } from './newsletter-retention-operational-readback.js'
+import { assertHistoricalReadOnlyRoot, assertHistoricalSelectedWave } from './newsletter-retention-historical-readonly-preparation.js'
 import { parseNewsletterRetentionPolicy } from './newsletter-retention.js'
 import { checkHistoricalGates, type HistoricalExecutorRoot, type HistoricalExecutorRequest, type HistoricalExecutorReceipt } from './newsletter-retention-historical-executor-contract.js'
 import {
@@ -549,17 +549,7 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
         database: { $transaction: provided.database.$transaction.bind(provided.database) },
         postcommit: { read: provided.postcommit.read.bind(provided.postcommit) },
     }
-    if (root.policy.apply === true || root.approval.policy.apply === true || !Number.isSafeInteger(root.maxGateAgeMs) || root.maxGateAgeMs <= 0 || root.maxGateAgeMs > 900_000
-        || !Number.isSafeInteger(root.maxPressure) || root.maxPressure < 0 || root.maxPressure > 100
-        || root.queueIds.length < 2 || new Set(root.queueIds).size !== root.queueIds.length || root.queueIds.some(id => !id)) throw new Error('historical trusted root limits invalid')
-    // Independent policy approval must pin BOTH domains; never derive SQL from Prisma.
-    const approvedSchema = root.approval.schema
-    if (!approvedSchema || !/^[a-f0-9]{64}$/.test(approvedSchema.expectedSqlDatabaseFingerprint)
-        || !/^[a-f0-9]{64}$/.test(approvedSchema.expectedPrismaFileFingerprint)
-        || approvedSchema.expectedSqlDatabaseFingerprint !== root.acquisitionRoot.expectedSqlDatabaseFingerprint
-        || approvedSchema.expectedPrismaFileFingerprint !== root.acquisitionRoot.expectedPrismaFileFingerprint
-        || approvedSchema.expectedPrismaFileFingerprint !== root.binding.schemaFingerprint
-        || approvedSchema.expectedPrismaFileFingerprint !== root.approval.expected.schemaFingerprint) throw new Error('historical approved schema commitments invalid')
+    assertHistoricalReadOnlyRoot(root)
     const policy = parseNewsletterRetentionPolicy(root.policy)
     const verifyAcquisition = createHistoricalAcquisitionVerifier(root.acquisitionRoot)
     const capabilities = new WeakMap<object, { selected: Awaited<ReturnType<typeof adaptNewsletterRetentionHistoricalArchive>>; authentication: ReturnType<typeof verifyAcquisition>; binding: HistoricalExecutorRoot['binding']; policy: typeof policy; approval: HistoricalExecutorRoot['approval'] }>()
@@ -582,15 +572,7 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
             work.check()
             receipt.stage = 'admission'
             const expected = root.approval.expected
-            const derived = { ...operationalChainBinding(root.binding), procedureFingerprint: root.acquisitionRoot.procedureFingerprint,
-                manifestHash: selected.manifest.hash, artifactHash: selected.artifact.hash,
-                counts: { B: 1, M: selected.candidate.messageCount, E: selected.candidate.errorCount, N: selected.candidate.notificationCount }, setSha256: selected.readbackDigests }
-            // Complete chain/selection/policy comparison, never caller flags or report.matches.
-            for (const [key, value] of Object.entries(derived)) {
-                const wanted = expected[key as keyof typeof expected]
-                if (typeof value === 'object' ? Object.entries(value).some(([k, v]) => (wanted as Record<string, unknown>)?.[k] !== v) : wanted !== value) throw new Error('historical wave binding mismatch')
-            }
-            if (JSON.stringify(policy) !== JSON.stringify(parseNewsletterRetentionPolicy(root.approval.policy))) throw new Error('historical wave policy mismatch')
+            assertHistoricalSelectedWave(root, selected)
             const authentication = verifyAcquisition(request.acquisition, expected, root.now())
             // Synchronous authenticated check-and-set before any gate/capability;
             // never return approval after gate failure or an unknown DB outcome.
