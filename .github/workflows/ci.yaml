@@ -34,7 +34,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - name: Regression-test CI subprocess failures and bounded cleanup
-        run: node --test tests/scripts/retention-ci-processes.node.mjs tests/scripts/retention-ci-userns.node.mjs tests/scripts/retention-ci-teardown.node.mjs tests/scripts/retention-ci-scratch.node.mjs
+        run: node --test tests/scripts/retention-ci-processes.node.mjs tests/scripts/retention-ci-userns.node.mjs tests/scripts/retention-ci-teardown.node.mjs tests/scripts/retention-ci-scratch.node.mjs tests/scripts/retention-historical-db.node.mjs tests/scripts/retention-historical-db-report.node.mjs
         env:
           TMPDIR: ${{ runner.temp }}
       - run: npm run test:run
@@ -103,6 +103,9 @@ jobs:
           CI_DB_HOST: 127.0.0.1
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
+        env:
+          RETENTION_HISTORICAL_DB_CI: '1'
+          RETENTION_HISTORICAL_DB_ENGINE: mysql
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ always() && hashFiles('artifacts/vitest-*-report.json', 'artifacts/vitest-report.json') != '' }}
         with:
@@ -111,6 +114,12 @@ jobs:
             artifacts/vitest-db-report.json
             artifacts/vitest-safe-report.json
             artifacts/vitest-report.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() && hashFiles('artifacts/retention-historical-db-report.json') != '' }}
+        with:
+          name: mysql-retention-historical-db-report
+          path: artifacts/retention-historical-db-report.json
           if-no-files-found: error
 
   mariadb:
@@ -143,6 +152,9 @@ jobs:
           CI_DB_HOST: 127.0.0.1
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
+        env:
+          RETENTION_HISTORICAL_DB_CI: '1'
+          RETENTION_HISTORICAL_DB_ENGINE: mariadb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ always() && hashFiles('artifacts/vitest-*-report.json', 'artifacts/vitest-report.json') != '' }}
         with:
@@ -151,4 +163,10 @@ jobs:
             artifacts/vitest-db-report.json
             artifacts/vitest-safe-report.json
             artifacts/vitest-report.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() && hashFiles('artifacts/retention-historical-db-report.json') != '' }}
+        with:
+          name: mariadb-retention-historical-db-report
+          path: artifacts/retention-historical-db-report.json
           if-no-files-found: error

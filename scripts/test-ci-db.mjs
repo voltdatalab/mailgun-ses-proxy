@@ -20,7 +20,9 @@ export function runDatabaseCoverage(runPhase = run) {
     const safeGate = runPhase(process.execPath, ['scripts/assert-vitest-report.mjs', 'artifacts/vitest-safe-report.json'])
     const mergeStatus = runPhase(process.execPath, ['scripts/merge-retention-vitest-reports.mjs', 'artifacts/vitest-db-report.json', 'artifacts/vitest-safe-report.json', 'artifacts/vitest-report.json'])
     const finalGate = runPhase(process.execPath, ['scripts/assert-vitest-report.mjs', 'artifacts/vitest-report.json'])
-    return dbStatus || safeStatus || safeGate || mergeStatus || finalGate ? 1 : 0
+    // Separate mandatory real-DB executor phase, never merged into skip reconciliation.
+    const historicalStatus = runPhase(process.execPath, ['scripts/test-retention-historical-db.mjs'])
+    return dbStatus || safeStatus || safeGate || mergeStatus || finalGate || historicalStatus ? 1 : 0
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -28,6 +30,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // identities may be reconciled against a second, offline real-filesystem run.
     if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('required DB coverage requires an ephemeral GitHub-hosted runner')
     await mkdir('artifacts', { recursive: true })
-    for (const name of ['vitest-db-report.json', 'vitest-safe-report.json', 'vitest-report.json']) await rm(`artifacts/${name}`, { force: true })
+    for (const name of ['vitest-db-report.json', 'vitest-safe-report.json', 'vitest-report.json', 'retention-historical-db-report.json']) await rm(`artifacts/${name}`, { force: true })
     process.exitCode = runDatabaseCoverage()
 }

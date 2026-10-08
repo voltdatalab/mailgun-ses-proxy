@@ -1,5 +1,9 @@
 # SES retention: exact-wave handoff
 
+## New mandatory database integration (implementation, not hosted proof)
+
+A dedicated sixth phase now connects the internal historical executor to real Prisma Serializable transactions and an independent native SQL connection in the existing **hosted ephemeral MySQL/MariaDB jobs only**. Eight mandatory scenarios cover commit, rollback after actual DELETE, precommit divergence, postcommit failure/mismatch, unsigned/gate refusal and unknown commit response. Exact finite synthetic fixtures, read-only target guards, attempt-bound native rollback/readback observations and a separate strict JSON artifact consumer are implemented. Ordinary/safe report reconciliation, historical apply-disabled and both audit gates are unchanged. **No DB/Docker execution occurred locally; the new real database cases and artifacts remain unverified until parent SPEC/quality review and hosted CI.** See [the harness matrix, boundaries and local evidence](retention-historical-db-integration.md). The older results below are historical baselines, not certification of these additions.
+
 ## Current outcome
 
 Internal synthetic integration is independently approved for compliance and quality, and is being consolidated on the existing draft PR branch. No deployment, deletion, restart, backup, restore, Windows changes, trust-root provisioning or production mutation occurred. Historical CLI apply remains unavailable; legacy evidence TTL and existing apply behavior are unchanged. Latest parent and independent reviewer verification: 400 passed / 1 skipped across all 20 retention test files in the offline private harness; both TypeScript projects, full ESLint and diff-check passed. These results do not certify a real MySQL rollback, real historical ingestion/RSS, current live gates or admission of the actual operator report.

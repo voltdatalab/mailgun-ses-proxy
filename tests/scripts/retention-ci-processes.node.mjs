@@ -63,19 +63,20 @@ for (const failure of [
     { status: null, signal: 'SIGKILL' },
     { status: 2 },
 ]) {
-    for (let phase = 0; phase < 5; phase++) {
+    for (let phase = 0; phase < 6; phase++) {
         test(`connected DB orchestration rejects phase ${phase}: ${failure.error?.code ?? failure.signal ?? failure.status}`, () => {
             let calls = 0
             const status = runDatabaseCoverage((command, args, env) => run(command, args, env, () => calls++ === phase ? failure : { status: 0 }))
-            assert.equal(calls, 5, 'all phases remain diagnostic and mandatory')
+            assert.equal(calls, 6, 'all phases remain diagnostic and mandatory')
             assert.equal(status, 1)
         })
     }
 }
-test('connected DB orchestration succeeds only when all five phases succeed', () => {
+test('connected DB orchestration succeeds only when all six phases succeed', () => {
     const commands = []
     assert.equal(runDatabaseCoverage((command, args, env) => run(command, args, env, () => { commands.push([command, args]); return { status: 0 } })), 0)
-    assert.equal(commands.length, 5)
+    assert.equal(commands.length, 6)
+    assert.equal(commands[5][1][0], 'scripts/test-retention-historical-db.mjs')
     assert.equal(commands[0][1][0], 'node_modules/vitest/vitest.mjs')
     assert.equal(commands[1][0], 'sudo')
     assert.ok(commands[1][1].includes('--ci-multi-uid'))

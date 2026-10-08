@@ -108,10 +108,10 @@ test('workflow and real safe runner retain connected preflight and mandatory scr
     assert.match(workflow, /run: node --test[^\n]*tests\/scripts\/retention-ci-scratch.node.mjs/)
     assert.equal(workflow.match(/run: npm run test:ci:db/g).length, 2)
 })
-test('actual five-phase DB entry selects private allocator, never RUNNER_TEMP', () => {
+test('actual six-phase DB entry selects private allocator, never RUNNER_TEMP', () => {
     const phases = []
     assert.equal(runDatabaseCoverage((command, args) => { phases.push([command, args]); return 0 }), 0)
-    assert.equal(phases.length, 5)
+    assert.equal(phases.length, 6)
     assert.equal(phases[1][0], 'sudo')
     assert.ok(phases[1][1].includes('scripts/retention-ci-scratch.mjs'))
     assert.ok(!phases[1][1].some(arg => arg.startsWith('TMPDIR=')))
