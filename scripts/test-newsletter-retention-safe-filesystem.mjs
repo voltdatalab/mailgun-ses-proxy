@@ -4,6 +4,7 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { runSafeNamespace } from './retention-safe-subprocess.mjs'
+import { probeBootstrapTeardown } from './retention-ci-teardown.mjs'
 import { validateSafeRunnerMode } from './retention-safe-runner-policy.mjs'
 const args = process.argv.slice(2)
 const multiUid = args[0] === '--ci-multi-uid'
@@ -55,7 +56,7 @@ try {
     }
     await copyPackage('vitest')
     // Exact local synthetic test/source snapshot, no .env, evidence, git or DB data.
-    for (const path of ['service', 'lib/database.ts', 'tests/service', 'tests/setup.ts', 'vitest.config.ts', 'tsconfig.json', 'package.json', 'scripts/merge-retention-vitest-reports.mjs', 'scripts/retention-safe-runner-policy.mjs']) {
+    for (const path of ['service', 'lib/database.ts', 'tests/service', 'tests/setup.ts', 'vitest.config.ts', 'tsconfig.json', 'package.json', 'scripts/merge-retention-vitest-reports.mjs', 'scripts/retention-safe-runner-policy.mjs', 'scripts/retention-ci-teardown-validation.mjs']) {
         await mkdir(dirname(join(fixture, 'repo', path)), { recursive: true, mode: 0o700 })
         await copyBounded(path, join(fixture, 'repo', path))
     }
@@ -108,16 +109,28 @@ try {
     // selected test, honestly failing foreign ownership instead of skipping it.
     await writeFile(join(fixture, 'repo/run-vitest.mjs'), `process.chdir('/repo'); try { await import('./probe-owner.mjs') } catch (error) { if (${multiUid}) throw error; console.error('foreign-owner capability unavailable:', error.message) }; await import('./node_modules/vitest/vitest.mjs');\n`)
     const reportArgs = reportPath ? ['--reporter=json', '--outputFile=/repo/vitest-safe-report.json'] : []
-    const result = runSafeNamespace([...userArgs, '--mount', '--net', '--pid', '--fork', '--kill-child', 'sh', '-c', command,
-        'sh', resolve(fixture), ...args, ...reportArgs], { stdio: 'inherit', timeout: 300_000,
-        env: { PATH: process.env.PATH, NODE_ENV: 'test', NODE_OPTIONS: '--max-old-space-size=512', TMPDIR: '/scratch', RETENTION_SAFE_FIXTURE_ROOT: '/fixtures' } })
+    // Build only in this disposable fixture. The root creator maps its own
+    // blocked fork child directly, then releases it only after exact readback.
+    const launcher = multiUid ? join(fixture, 'ci-userns') : 'unshare'
+    if (multiUid) {
+        const bootstrap = spawnSync(process.env.CC ?? 'cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', 'scripts/retention-ci-userns.c', '-o', launcher], { encoding: 'utf8' })
+        if (bootstrap.error || bootstrap.signal || bootstrap.status !== 0) throw new Error(`CI namespace bootstrap build failed: ${bootstrap.stderr}`)
+    }
+    // Mandatory actual compiled-C chain probe BEFORE the real Vitest launch.
+    // Local one-UID execution cannot supply hosted teardown certification.
+    const bootstrapTeardown = multiUid ? await probeBootstrapTeardown({ launcher, fixture }) : null
+    const namespaceArgs = multiUid ? ['--ci-multi-uid'] : [...userArgs, '--mount', '--net', '--pid', '--fork', '--kill-child']
+    const result = runSafeNamespace([...namespaceArgs, '/bin/sh', '-c', command,
+        'sh', resolve(fixture), ...args, ...reportArgs], { launcher, stdio: 'inherit', timeout: 300_000,
+        env: { PATH: process.env.PATH, NODE_ENV: 'test', NODE_OPTIONS: '--max-old-space-size=512', TMPDIR: '/scratch', RETENTION_SAFE_FIXTURE_ROOT: '/fixtures',
+            ...(multiUid ? { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' } : {}) } })
     if (reportPath) {
         if (await realpath(dirname(reportPath)) !== dirname(reportPath)) throw new Error('artifact parent must not be a symlink')
         try {
             const report = JSON.parse(await readFile(join(fixture, 'repo/vitest-safe-report.json'), 'utf8'))
             let probe
             try { probe = JSON.parse(await readFile(join(fixture, 'repo/owner-probe.json'), 'utf8')) } catch { probe = { isolated: true, foreignOwner: null } }
-            report.retentionSafeRunner = { ...probe, exitCode: result.error || result.signal ? 1 : result.status ?? 1 }
+            report.retentionSafeRunner = { ...probe, bootstrapTeardown, exitCode: result.error || result.signal ? 1 : result.status ?? 1 }
             await writeFile(reportPath, JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o644 })
         } catch (error) { if (error.code !== 'ENOENT') throw error; console.error('safe runner produced no report') }
     }

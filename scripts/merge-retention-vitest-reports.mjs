@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+import { validateTeardownStartup } from './retention-ci-teardown-validation.mjs'
 
 const operational = 'tests/service/newsletter-retention-operational-filesystem.test.ts'
 const historical = 'tests/service/newsletter-retention-historical-preparation.test.ts'
@@ -39,6 +40,10 @@ function indexReport(report) {
 export function mergeRetentionReports(database, safe) {
     const db = indexReport(database), isolated = indexReport(safe)
     const capability = safe.retentionSafeRunner
+    const teardown = capability?.bootstrapTeardown
+    if (teardown?.version !== 1 || teardown.verified !== true || teardown.descendantsGone !== true || teardown.timeoutMs !== 900
+        || !Number.isFinite(teardown.elapsedMs) || teardown.elapsedMs < 850 || teardown.elapsedMs > 1500) throw new Error('missing successful bounded bootstrap teardown probe')
+    validateTeardownStartup(teardown.started)
     if (capability?.foreignOwner?.uid !== 1 || capability?.foreignOwner?.gid !== 1 || capability.isolated !== true || capability.exitCode !== 0) throw new Error('missing successful isolated foreign-owner probe')
     for (const map of [capability.uidMap, capability.gidMap]) {
         if (typeof map !== 'string' || !/^\s*0\s+0\s+2\s*$/.test(map)) throw new Error('expected exactly UID/GID 0+1 mapped')
