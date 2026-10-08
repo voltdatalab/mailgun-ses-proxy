@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, chown, link, mkdir, mkdtemp, open, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, chown, link, mkdir, mkdtemp, open, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { readPinnedNewsletterRetentionOperationalReport } from '@/service/newsletter-retention-cli'
@@ -20,11 +20,13 @@ describe.skipIf(!root)('real private operational metadata filesystem', () => {
         expect(await readPinnedNewsletterRetentionOperationalReport(path, digest(' {"fixture":true}\n'))).toEqual({ report: { fixture: true }, reportSha256: digest(' {"fixture":true}\n'), collectionAuthenticated: false })
         await expect(readPinnedNewsletterRetentionOperationalReport(path, digest('{"fixture":true}'))).rejects.toThrow('byte pin invalid')
     }))
-    it('rejects real foreign owner metadata when runner can create it', async (context) => fixture(async (_dir, path) => {
-        try { await chown(path, 1, 1) } catch (error) {
-            if (['EINVAL', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) context.skip()
-            throw error
-        }
+    it('rejects real foreign owner metadata when runner can create it', async () => fixture(async (_dir, path) => {
+        // Capability is mandatory: an unmapped UID is a failure, never a skip.
+        await chown(path, 1, 1)
+        const owner = await stat(path)
+        expect(owner.uid).toBe(1)
+        expect(owner.gid).toBe(1)
+        expect(owner.uid).not.toBe(process.getuid!())
         await expect(readPinnedNewsletterRetentionOperationalReport(path, digest(' {"fixture":true}\n'))).rejects.toThrow('descriptor or byte pin invalid')
     }))
     it.each(['directory', 'mode', 'symlink', 'hardlink', 'parent-symlink', 'parent-mode', 'empty', 'oversize', 'invalid-utf8', 'malformed-json'])('rejects real %s metadata', async (attack) => fixture(async (dir, path) => {

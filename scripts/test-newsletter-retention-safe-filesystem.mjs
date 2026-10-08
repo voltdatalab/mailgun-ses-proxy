@@ -1,15 +1,44 @@
-// Linux-only, offline synthetic chroot in unprivileged user/mount/net/PID namespaces.
-// Only newly allocated $TMPDIR tree + isolated procfs; no Docker or production mounts.
-import { chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+// Linux-only offline synthetic chroot in private user/mount/net/PID namespaces.
+// Default is unprivileged one-UID; explicit hosted CI bootstrap maps only UID/GID 0+1.
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { runSafeNamespace } from './retention-safe-subprocess.mjs'
+import { validateSafeRunnerMode } from './retention-safe-runner-policy.mjs'
+const args = process.argv.slice(2)
+const multiUid = args[0] === '--ci-multi-uid'
+if (multiUid) args.shift()
+let reportPath
+if (args[0] === '--report-file') {
+    args.shift()
+    reportPath = resolve(args.shift() ?? '')
+    // Privileged bootstrap may export only a new, fixed CI artifact, never overwrite.
+    if (reportPath !== resolve('artifacts/vitest-safe-report.json')) throw new Error('report must be artifacts/vitest-safe-report.json')
+}
+const userArgs = validateSafeRunnerMode({ multiUid, uid: process.getuid(), githubActions: process.env.GITHUB_ACTIONS, runnerEnvironment: process.env.RUNNER_ENVIRONMENT })
 if (!process.env.TMPDIR) throw new Error('TMPDIR required; no system-temp fallback')
 const fixture = await mkdtemp(join(process.env.TMPDIR, 'ses-safe-'))
 await chmod(fixture, 0o700)
+let copiedBytes = 0, copiedFiles = 0, copiedDirectories = 0
+async function copyBounded(source, target, depth = 0) {
+    if (depth > 64) throw new Error('safe fixture depth budget exceeded')
+    const info = await lstat(source)
+    if (info.isDirectory()) {
+        if (++copiedDirectories > 25_000) throw new Error('safe fixture directory budget exceeded')
+        await mkdir(target, { recursive: true, mode: 0o700 })
+        for (const name of await readdir(source)) await copyBounded(join(source, name), join(target, name), depth + 1)
+    } else {
+        // Resolve only explicitly selected package roots and loader libraries;
+        // never follow links/special files nested in a source snapshot.
+        if (!info.isFile()) throw new Error(`non-regular fixture source: ${source}`)
+        copiedFiles++; copiedBytes += info.size
+        if (copiedFiles > 25_000 || copiedBytes > 512 * 1024 * 1024) throw new Error('safe fixture copy budget exceeded')
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 })
+        await copyFile(source, target)
+    }
+}
 async function copyAbsolute(path) {
-    const target = join(fixture, path)
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 })
-    await copyFile(await realpath(path), target)
+    await copyBounded(await realpath(path), join(fixture, path))
 }
 try {
     const modules = await realpath('node_modules'), seen = new Set()
@@ -21,16 +50,16 @@ try {
         try { pkg = JSON.parse(await readFile(join(source, 'package.json'), 'utf8')) }
         catch (error) { if (error.code === 'ENOENT') return; throw error }
         await mkdir(dirname(join(fixture, 'repo/node_modules', name)), { recursive: true, mode: 0o700 })
-        await cp(source, join(fixture, 'repo/node_modules', name), { recursive: true, dereference: true })
+        await copyBounded(await realpath(source), join(fixture, 'repo/node_modules', name))
         for (const dependency of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) await copyPackage(dependency)
     }
     await copyPackage('vitest')
     // Exact local synthetic test/source snapshot, no .env, evidence, git or DB data.
-    for (const path of ['service', 'lib/database.ts', 'tests/service', 'tests/setup.ts', 'vitest.config.ts', 'tsconfig.json', 'package.json']) {
+    for (const path of ['service', 'lib/database.ts', 'tests/service', 'tests/setup.ts', 'vitest.config.ts', 'tsconfig.json', 'package.json', 'scripts/merge-retention-vitest-reports.mjs', 'scripts/retention-safe-runner-policy.mjs']) {
         await mkdir(dirname(join(fixture, 'repo', path)), { recursive: true, mode: 0o700 })
-        await cp(path, join(fixture, 'repo', path), { recursive: true, dereference: true })
+        await copyBounded(path, join(fixture, 'repo', path))
     }
-    await copyFile(process.execPath, join(fixture, 'node'))
+    await copyBounded(await realpath(process.execPath), join(fixture, 'node'))
     // Preserve repository cwd for tests that read package metadata. The database
     // source above is copied only for vi.mock resolution; no generated client/env.
     await writeFile(join(fixture, 'repo/run-vitest.mjs'), 'process.chdir("/repo"); await import("./node_modules/vitest/vitest.mjs")\n')
@@ -60,10 +89,38 @@ try {
     for (const path of ['fixtures', 'scratch', 'proc', 'dev']) await mkdir(join(fixture, path), { mode: 0o700 })
     // /dev/null is a synthetic regular file: no host device bind mount.
     await writeFile(join(fixture, 'dev/null'), '')
-    const result = spawnSync('unshare', ['--user', '--map-root-user', '--mount', '--net', '--pid', '--fork', 'sh', '-c',
-        'ulimit -t 240; ulimit -f 1048576; mount -t proc proc "$1/proc" && root="$1" && shift && exec chroot "$root" /node /repo/run-vitest.mjs run --root /repo --maxWorkers 2 "$@"',
-        'sh', resolve(fixture), ...process.argv.slice(2)], { stdio: 'inherit', timeout: 300_000,
+    // Probe inside the same chroot/namespaces as Vitest, not a mocked chown.
+    await writeFile(join(fixture, 'repo/probe-owner.mjs'), `
+import { writeFile, chown, stat, readFile, unlink } from 'node:fs/promises';
+const path = '/fixtures/foreign-owner-probe';
+await writeFile(path, 'synthetic probe', { mode: 0o400 });
+try {
+  await chown(path, 1, 1);
+  const owner = await stat(path);
+  if (owner.uid !== 1 || owner.gid !== 1 || process.getuid() !== 0) throw new Error('foreign owner probe failed');
+  const uidMap = await readFile('/proc/self/uid_map', 'utf8');
+  const gidMap = await readFile('/proc/self/gid_map', 'utf8');
+  await writeFile('/repo/owner-probe.json', JSON.stringify({ foreignOwner: { uid: owner.uid, gid: owner.gid }, uidMap, gidMap, isolated: true }));
+} finally { await unlink(path); }
+`)
+    const command = 'ulimit -t 240; ulimit -f 1048576; mount -t proc proc "$1/proc" && root="$1" && shift && exec chroot "$root" /node /repo/run-vitest.mjs run --root /repo --maxWorkers 2 "$@"'
+    // Probe is mandatory in hosted CI. Local one-UID runs still execute every
+    // selected test, honestly failing foreign ownership instead of skipping it.
+    await writeFile(join(fixture, 'repo/run-vitest.mjs'), `process.chdir('/repo'); try { await import('./probe-owner.mjs') } catch (error) { if (${multiUid}) throw error; console.error('foreign-owner capability unavailable:', error.message) }; await import('./node_modules/vitest/vitest.mjs');\n`)
+    const reportArgs = reportPath ? ['--reporter=json', '--outputFile=/repo/vitest-safe-report.json'] : []
+    const result = runSafeNamespace([...userArgs, '--mount', '--net', '--pid', '--fork', '--kill-child', 'sh', '-c', command,
+        'sh', resolve(fixture), ...args, ...reportArgs], { stdio: 'inherit', timeout: 300_000,
         env: { PATH: process.env.PATH, NODE_ENV: 'test', NODE_OPTIONS: '--max-old-space-size=512', TMPDIR: '/scratch', RETENTION_SAFE_FIXTURE_ROOT: '/fixtures' } })
+    if (reportPath) {
+        if (await realpath(dirname(reportPath)) !== dirname(reportPath)) throw new Error('artifact parent must not be a symlink')
+        try {
+            const report = JSON.parse(await readFile(join(fixture, 'repo/vitest-safe-report.json'), 'utf8'))
+            let probe
+            try { probe = JSON.parse(await readFile(join(fixture, 'repo/owner-probe.json'), 'utf8')) } catch { probe = { isolated: true, foreignOwner: null } }
+            report.retentionSafeRunner = { ...probe, exitCode: result.error || result.signal ? 1 : result.status ?? 1 }
+            await writeFile(reportPath, JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o644 })
+        } catch (error) { if (error.code !== 'ENOENT') throw error; console.error('safe runner produced no report') }
+    }
     if (result.error) throw result.error
     process.exitCode = result.status ?? 1
 } finally { await rm(fixture, { recursive: true, force: true }) }
