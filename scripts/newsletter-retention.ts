@@ -7,10 +7,12 @@ import {
     NewsletterRetentionCliError,
     openVerifiedNewsletterRetentionEscrowSource,
     readNewsletterRetentionJsonFile,
+
     writeNewsletterRetentionEscrowFileExclusive,
     writeNewsletterRetentionJsonFileExclusive,
     type NewsletterRetentionCliDatabase,
 } from '../service/newsletter-retention-cli.js'
+import { openNewsletterRetentionHistoricalArchiveFromEnvironment } from '../service/newsletter-retention-operational-metadata-source.js'
 import { NewsletterRetentionApplyError } from '../service/newsletter-retention-applier.js'
 import {
     createNewsletterRetentionMariaDbLockProvider,
@@ -24,6 +26,11 @@ async function main(): Promise<void> {
         database,
         createLockProvider: () => createNewsletterRetentionMariaDbLockProvider(),
         now: () => new Date(),
+        // Only an explicit preparation flag consumes stdin. Existing apply/dry-run
+        // paths do not open the historical source or change their evidence TTL.
+        openHistoricalArchive: process.env.NEWSLETTER_RETENTION_HISTORICAL_BINDING_FILE
+            ? () => openNewsletterRetentionHistoricalArchiveFromEnvironment(process.stdin, process.env)
+            : undefined,
         schemaFingerprint: async () => createHash('sha256').update(await readFile(schemaPath)).digest('hex'),
         writeEscrowFileExclusive: writeNewsletterRetentionEscrowFileExclusive,
         openVerifiedEscrowSource: openVerifiedNewsletterRetentionEscrowSource,

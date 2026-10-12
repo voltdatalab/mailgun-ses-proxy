@@ -1,7 +1,10 @@
+import { NewsletterRetentionCliError, normalizeAbsolutePath, openBoundParentDirectory, readEscrowFileIdentity, assertEscrowFileIdentity, type BoundParentDirectory } from './newsletter-retention-secure-metadata.js'
+export { NewsletterRetentionCliError, readPinnedNewsletterRetentionOperationalReport } from './newsletter-retention-secure-metadata.js'
+import { prepareNewsletterRetentionHistoricalArchive, type NewsletterRetentionHistoricalPreparationSource, type NewsletterRetentionArchivePreparationDatabase } from './newsletter-retention-archive-preparation.js'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -68,6 +71,7 @@ export interface NewsletterRetentionCliDependencies {
     database: NewsletterRetentionCliDatabase
     createLockProvider(): NewsletterRetentionApplyLockProvider
     now(): Date
+    openHistoricalArchive?(): Promise<NewsletterRetentionHistoricalPreparationSource>
     schemaFingerprint(): string | Promise<string>
     writeEscrowFileExclusive(
         path: string,
@@ -108,9 +112,10 @@ export interface NewsletterRetentionCliApplyOutput {
     receipt: NewsletterRetentionApplyReceipt
 }
 
-export type NewsletterRetentionCliOutput = NewsletterRetentionCliDryRunOutput | NewsletterRetentionCliApplyOutput
+export type NewsletterRetentionCliOutput = NewsletterRetentionCliDryRunOutput | NewsletterRetentionCliApplyOutput | Awaited<ReturnType<typeof prepareNewsletterRetentionHistoricalArchive>>
 
 interface ParsedCliOptions {
+    prepareHistoricalArchive: boolean
     apply: boolean
     siteId: string
     cutoff: string
@@ -129,13 +134,6 @@ interface ParsedCliOptions {
     confirmSiteId?: string
 }
 
-export class NewsletterRetentionCliError extends Error {
-    constructor(message = 'newsletter retention command failed') {
-        super(message)
-        this.name = 'NewsletterRetentionCliError'
-    }
-}
-
 export async function executeNewsletterRetentionCli(
     argv: readonly string[],
     dependencies: NewsletterRetentionCliDependencies,
@@ -143,6 +141,40 @@ export async function executeNewsletterRetentionCli(
     const options = parseCliOptions(argv)
     const now = normalizeNow(dependencies.now())
     const rawEvidence = await dependencies.readJsonFile(options.evidenceFile, 'public')
+    if (options.prepareHistoricalArchive) {
+        if (!dependencies.openHistoricalArchive) throw new NewsletterRetentionCliError('historical archive trusted streaming source is not configured')
+        if (!isPlainObject(rawEvidence) || !isPlainObject(rawEvidence.health) || !isPlainObject(rawEvidence.dlq)) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        const unknownKeys = (value: Record<string, unknown>, allowed: string[]) => Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))
+        if (unknownKeys(rawEvidence, ['backup', 'restore', 'health', 'dlq'])
+            || unknownKeys(rawEvidence.health, ['queueCheckedAt', 'proxyCheckedAt', 'queueHealthy', 'proxyHealthy'])
+            || unknownKeys(rawEvidence.dlq, ['checkedAt', 'healthy', 'messageCount'])
+            || rawEvidence.dlq.healthy !== true) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        // Backup/restore receipt timestamps are NOT passed to legacy parsers or rewritten.
+        try {
+            return await prepareNewsletterRetentionHistoricalArchive({
+                policy: { siteId: options.siteId, cutoff: options.cutoff, maxBatches: options.maxBatches, maxMessages: options.maxMessages },
+                now: dependencies.now, schemaFingerprint: dependencies.schemaFingerprint,
+                database: dependencies.database as unknown as NewsletterRetentionArchivePreparationDatabase, lock: dependencies.createLockProvider(),
+                openArchive: dependencies.openHistoricalArchive,
+                live: async () => {
+                    const rawEvidence = await dependencies.readJsonFile(options.evidenceFile, 'public')
+        if (!isPlainObject(rawEvidence) || !isPlainObject(rawEvidence.health) || !isPlainObject(rawEvidence.dlq)) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+        const unknownKeys = (value: Record<string, unknown>, allowed: string[]) => Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))
+        if (unknownKeys(rawEvidence, ['backup', 'restore', 'health', 'dlq'])
+            || unknownKeys(rawEvidence.health, ['queueCheckedAt', 'proxyCheckedAt', 'queueHealthy', 'proxyHealthy'])
+            || unknownKeys(rawEvidence.dlq, ['checkedAt', 'healthy', 'messageCount'])
+            || rawEvidence.dlq.healthy !== true) throw new NewsletterRetentionCliError('historical archive live health evidence is invalid')
+            return { queueCheckedAt: rawEvidence.health.queueCheckedAt as string, proxyCheckedAt: rawEvidence.health.proxyCheckedAt as string,
+                    dlqCheckedAt: rawEvidence.dlq.checkedAt as string, queueHealthy: rawEvidence.health.queueHealthy as boolean,
+                    proxyHealthy: rawEvidence.health.proxyHealthy as boolean, dlqMessageCount: rawEvidence.dlq.messageCount as number }
+                },
+            })
+        } catch (error) {
+            // Adapter errors contain only fixed labels, never payloads/identifiers.
+            if (error instanceof Error && /^(historical archive|archive |restore |live archive |newsletter retention command)/.test(error.message)) throw new NewsletterRetentionCliError(error.message)
+            throw new NewsletterRetentionCliError('historical archive preparation failed')
+        }
+    }
     const evidence = parseCliEvidence(rawEvidence, now)
     const policy = parseNewsletterRetentionPolicy({
         siteId: options.siteId,
@@ -349,55 +381,6 @@ export async function openVerifiedNewsletterRetentionEscrowSource(
         await handle?.close().catch(() => undefined)
         await parent?.handle.close().catch(() => undefined)
         throw new NewsletterRetentionCliError('newsletter retention escrow source is invalid')
-    }
-}
-
-interface EscrowFileIdentity {
-    dev: string
-    ino: string
-    size: number
-    mtimeMs: number
-    ctimeMs: number
-}
-
-async function readEscrowFileIdentity(
-    handle: Awaited<ReturnType<typeof open>>,
-): Promise<EscrowFileIdentity> {
-    const stat = await handle.stat()
-    const hardFileBytes = NEWSLETTER_RETENTION_ESCROW_MAX_TOTAL_BYTES + NEWSLETTER_RETENTION_ESCROW_MAX_RECORDS + 2
-    if (
-        !stat.isFile()
-        || stat.nlink !== 1
-        || stat.uid !== process.getuid?.()
-        || (stat.mode & 0o777) !== 0o400
-        || !Number.isSafeInteger(stat.size)
-        || stat.size <= 0
-        || stat.size > hardFileBytes
-    ) {
-        throw new Error('escrow file metadata is invalid')
-    }
-    return {
-        dev: String(stat.dev),
-        ino: String(stat.ino),
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-        ctimeMs: stat.ctimeMs,
-    }
-}
-
-async function assertEscrowFileIdentity(
-    handle: Awaited<ReturnType<typeof open>>,
-    expected: EscrowFileIdentity,
-): Promise<void> {
-    const actual = await readEscrowFileIdentity(handle)
-    if (
-        actual.dev !== expected.dev
-        || actual.ino !== expected.ino
-        || actual.size !== expected.size
-        || actual.mtimeMs !== expected.mtimeMs
-        || actual.ctimeMs !== expected.ctimeMs
-    ) {
-        throw new Error('escrow file identity changed')
     }
 }
 
@@ -766,7 +749,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
     }
 
     const flags = new Map<string, string | true>()
-    const booleanFlags = new Set(['--apply'])
+    const booleanFlags = new Set(['--apply', '--prepare-historical-archive'])
     const valueFlags = new Set([
         '--site-id',
         '--cutoff',
@@ -811,6 +794,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
     const cutoff = requireStringFlag(flags, '--cutoff')
     const evidenceFile = requireAbsolutePathFlag(flags, '--evidence-file')
     const options: ParsedCliOptions = {
+        prepareHistoricalArchive: flags.get('--prepare-historical-archive') === true,
         apply,
         siteId,
         cutoff,
@@ -834,6 +818,7 @@ function parseCliOptions(argv: readonly string[]): ParsedCliOptions {
 }
 
 function validateModeSpecificOptions(options: ParsedCliOptions): void {
+    if (options.prepareHistoricalArchive && (options.apply || options.manifestOut || options.privateArtifactOut || options.escrowOut)) throw new NewsletterRetentionCliError('historical archive preparation forbids apply and payload/artifact outputs')
     if (!options.apply) {
         if (
             options.manifestFile
@@ -970,80 +955,10 @@ function optionalHashFlag(flags: Map<string, string | true>, flag: string): stri
     return value
 }
 
-function normalizeAbsolutePath(value: unknown, field: string): string {
-    if (
-        typeof value !== 'string'
-        || value.length === 0
-        || value.trim() !== value
-        || !isAbsolute(value)
-        || resolve(value) !== value
-    ) {
-        throw new NewsletterRetentionCliError(`newsletter retention ${field} must be an absolute path`)
-    }
-    return value
-}
-
 function ensureDistinctPaths(paths: Array<string | undefined>): void {
     const present = paths.filter((path): path is string => path !== undefined)
     if (new Set(present).size !== present.length) {
         throw new NewsletterRetentionCliError('newsletter retention file paths must be distinct')
-    }
-}
-
-interface BoundParentDirectory {
-    handle: Awaited<ReturnType<typeof open>>
-    boundFilePath: string
-    fileName: string
-}
-
-async function openBoundParentDirectory(path: string): Promise<BoundParentDirectory> {
-    const fileName = basename(path)
-    if (!fileName || fileName === '.' || fileName === '..' || fileName.includes(sep)) {
-        throw new Error('file name is invalid')
-    }
-
-    const components = dirname(path).split(sep).filter((component) => component.length > 0)
-    const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
-    let current = await open(sep, directoryFlags)
-    try {
-        await validateSecureDirectoryHandle(current)
-        for (const component of components) {
-            const next = await open(`/proc/self/fd/${current.fd}/${component}`, directoryFlags)
-            try {
-                await validateSecureDirectoryHandle(next)
-            } catch (error) {
-                await next.close().catch(() => undefined)
-                throw error
-            }
-            await current.close()
-            current = next
-        }
-
-        return {
-            handle: current,
-            boundFilePath: `/proc/self/fd/${current.fd}/${fileName}`,
-            fileName,
-        }
-    } catch (error) {
-        await current.close().catch(() => undefined)
-        throw error
-    }
-}
-
-async function validateSecureDirectoryHandle(handle: Awaited<ReturnType<typeof open>>): Promise<void> {
-    const stat = await handle.stat()
-    if (!stat.isDirectory()) {
-        throw new Error('parent path must contain only directories')
-    }
-    const getuid = process.getuid
-    const currentUid = typeof getuid === 'function' ? getuid.call(process) : null
-    const groupOrOtherWritable = (stat.mode & 0o022) !== 0
-    const rootOwnedStickyDirectory = stat.uid === 0 && (stat.mode & 0o1000) !== 0
-    if (groupOrOtherWritable && !rootOwnedStickyDirectory) {
-        throw new Error('parent path permissions are unsafe')
-    }
-    if (currentUid !== null && stat.uid !== 0 && stat.uid !== currentUid) {
-        throw new Error('parent path owner is unsafe')
     }
 }
 
