@@ -16,7 +16,7 @@ export function runDatabaseCoverage(runPhase = run) {
     // No Docker, host mounts, sysctl changes, ancestor chmod or production payloads.
     const safeStatus = runPhase('sudo', ['-n', 'env', '-i', 'PATH=/usr/bin:/bin', 'GITHUB_ACTIONS=true', 'RUNNER_ENVIRONMENT=github-hosted',
         process.execPath, 'scripts/retention-ci-scratch.mjs', '--ci-multi-uid', '--report-file', 'artifacts/vitest-safe-report.json',
-        'tests/service/newsletter-retention-operational-filesystem.test.ts', 'tests/service/newsletter-retention-historical-preparation.test.ts'])
+        'tests/service/newsletter-retention-operational-filesystem.test.ts', 'tests/service/newsletter-retention-historical-preparation.test.ts', 'tests/service/newsletter-retention-historical-authorization-ledger.test.ts'])
     const safeGate = runPhase(process.execPath, ['scripts/assert-vitest-report.mjs', 'artifacts/vitest-safe-report.json'])
     const mergeStatus = runPhase(process.execPath, ['scripts/merge-retention-vitest-reports.mjs', 'artifacts/vitest-db-report.json', 'artifacts/vitest-safe-report.json', 'artifacts/vitest-report.json'])
     const finalGate = runPhase(process.execPath, ['scripts/assert-vitest-report.mjs', 'artifacts/vitest-report.json'])

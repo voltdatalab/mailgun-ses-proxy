@@ -4,6 +4,7 @@ import { validateTeardownStartup } from './retention-ci-teardown-validation.mjs'
 
 const operational = 'tests/service/newsletter-retention-operational-filesystem.test.ts'
 const historical = 'tests/service/newsletter-retention-historical-preparation.test.ts'
+const ledger = 'tests/service/newsletter-retention-historical-authorization-ledger.test.ts'
 function fileIdentity(name) {
     const file = name.slice(name.lastIndexOf('/tests/') + 1)
     if (!file.startsWith('tests/') || file.split('/').some(part => part === '..' || part === '.')) throw new Error('invalid report file identity')
@@ -24,7 +25,7 @@ function indexReport(report) {
                 // Existing ordinary it.each cases can render the same title.
                 // Preserve every passed occurrence; never reconcile ambiguous
                 // safe-only identities or hide duplicate skipped assertions.
-                if ([operational, historical].includes(file) || status !== 'passed' || assertions.get(id).assertion.status !== 'passed') throw new Error(`duplicate assertion: ${id}`)
+                if ([operational, historical, ledger].includes(file) || status !== 'passed' || assertions.get(id).assertion.status !== 'passed') throw new Error(`duplicate assertion: ${id}`)
                 let occurrence = 1
                 while (assertions.has(JSON.stringify([file, assertion.fullName, occurrence]))) occurrence++
                 id = JSON.stringify([file, assertion.fullName, occurrence])
@@ -51,8 +52,10 @@ export function mergeRetentionReports(database, safe) {
     const ownerId = JSON.stringify([operational, 'real private operational metadata filesystem rejects real foreign owner metadata when runner can create it'])
     if (isolated.get(ownerId)?.assertion.status !== 'passed') throw new Error('missing actual foreign-owner rejection test')
     for (const [id, { file, assertion }] of isolated) {
-        if (![operational, historical].includes(file) || assertion.status !== 'passed' || !db.has(id)) throw new Error(`unexpected or non-passing safe assertion: ${id}`)
+        if (![operational, historical, ledger].includes(file) || assertion.status !== 'passed' || !db.has(id)) throw new Error(`unexpected or non-passing safe assertion: ${id}`)
     }
+    const ledgerAssertions = [...db].filter(([, value]) => value.file === ledger)
+    if (!ledgerAssertions.length || ledgerAssertions.some(([id]) => isolated.get(id)?.assertion.status !== 'passed')) throw new Error('missing actual isolated durable ledger assertions')
     const replaced = [], counts = { operational: 0, historical: 0 }
     for (const [id, { file, assertion }] of db) {
         if (assertion.status === 'passed') continue

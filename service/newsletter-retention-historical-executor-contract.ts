@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { HistoricalAuthorizationLedger } from './newsletter-retention-historical-authorization-ledger.js'
 import type { HistoricalArchiveBinding } from './newsletter-retention-historical-archive.js'
 import type { HistoricalAcquisitionEnvelope, HistoricalAcquisitionTrustRoot } from './newsletter-retention-historical-acquisition.js'
 import type { HistoricalOperationalBinding } from './newsletter-retention-operational-readback.js'
@@ -29,6 +30,8 @@ export interface HistoricalExecutorRoot {
     /** Independent operator/policy authorization, not acquisition-signer authorization. */
     approval: { expected: HistoricalOperationalBinding; policy: NewsletterRetentionPolicyInput; schema: { expectedSqlDatabaseFingerprint: string; expectedPrismaFileFingerprint: string } }
     acquisitionRoot: HistoricalAcquisitionTrustRoot
+    /** Mandatory independently provisioned durable one-shot approval. */
+    authorization: HistoricalAuthorizationLedger
     now(): Date
     lock: NewsletterRetentionApplyLockProvider
     /** Complete approved inventory including ALL main queues AND their DLQs. */
@@ -63,18 +66,33 @@ export function recipientCommitment(recipients: readonly string[]) {
 }
 export async function checkHistoricalGates(root: Pick<HistoricalExecutorRoot, 'now' | 'gates' | 'queueIds' | 'maxGateAgeMs' | 'maxPressure' | 'approval'>, request: HistoricalGateRequest, expectedRecipients: readonly string[]) {
     if (request.signal.aborted) throw new Error('historical executor cancelled')
+    // Capture methods/receiver once and own each result on its completion, not
+    // after Promise.all (another collector can mutate an already returned object).
+    const gates = root.gates
+    const collect = <T>(method: (request: HistoricalGateRequest) => Promise<T>) => {
+        const captured = method.bind(gates)
+        return Promise.resolve().then(async () => structuredClone(await captured(request)))
+    }
     const observations = await Promise.all([
-        Promise.resolve().then(() => root.gates.ghost(request)), Promise.resolve().then(() => root.gates.queues(request)),
-        Promise.resolve().then(() => root.gates.proxy(request)), Promise.resolve().then(() => root.gates.pressure(request)),
-        Promise.resolve().then(() => root.gates.schema(request)), Promise.resolve().then(() => root.gates.correlation(request)),
+        collect(gates.ghost), collect(gates.queues), collect(gates.proxy), collect(gates.pressure), collect(gates.schema), collect(gates.correlation),
     ])
+    assertHistoricalGateObservations(root, request, expectedRecipients, {
+        ghost: observations[0], queues: observations[1], proxy: observations[2],
+        pressure: observations[3], schema: observations[4], correlation: observations[5],
+    })
+}
+export type HistoricalGateObservations = { [Name in keyof HistoricalGatePorts]: Awaited<ReturnType<HistoricalGatePorts[Name]>> }
+/** Pure assertion shared with readonly finalization. Scheduling and ownership
+ * are implemented by each collector composition, not this assertion. */
+export function assertHistoricalGateObservations(root: Pick<HistoricalExecutorRoot, 'now' | 'queueIds' | 'maxGateAgeMs' | 'maxPressure' | 'approval'>, request: HistoricalGateRequest, expectedRecipients: readonly string[], collected: HistoricalGateObservations) {
+    const observations = [collected.ghost, collected.queues, collected.proxy, collected.pressure, collected.schema, collected.correlation]
     const now = root.now().getTime()
     for (const observation of observations) {
         const date = Date.parse(observation.checkedAt)
         if (!Number.isFinite(now) || !Number.isFinite(date) || new Date(date).toISOString() !== observation.checkedAt
             || date > now || now - date > root.maxGateAgeMs || observation.scopeHash !== request.artifactHash) throw new Error('historical gate scope or freshness invalid')
     }
-    const [ghost, queues, proxy, pressure, schema, correlation] = observations
+    const { ghost, queues, proxy, pressure, schema, correlation } = collected
     if (JSON.stringify(recipientCommitment(ghost.recipients)) !== JSON.stringify(recipientCommitment(expectedRecipients))) throw new Error('historical Ghost recipient set mismatch')
     if (!Array.isArray(queues.queues) || queues.queues.length !== root.queueIds.length || new Set(queues.queues.map(q => q.id)).size !== root.queueIds.length
         || queues.queues.some(q => !root.queueIds.includes(q.id) || [q.visible, q.inflight, q.delayed].some(n => n !== 0))) throw new Error('historical complete queue/DLQ census refused')

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFile, mkdir, writeFile } from 'node:fs/promises'
+import { readFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { historicalAuthorizationScope, provisionHistoricalAuthorization, openHistoricalAuthorizationLedger } from '../../service/newsletter-retention-historical-authorization-ledger'
 import mariadb, { type Connection } from 'mariadb'
 import { PrismaMariaDb } from '@prisma/adapter-mariadb'
 import { PrismaClient } from '../../lib/generated'
@@ -88,6 +90,7 @@ function sentinelRows(snapshot: Snapshot, fixtures: Snapshot) {
 test('mandatory connected historical executor with real Serializable SQL and native evidence', async () => {
     const target = assertHistoricalCiTarget(process.env)
     const artifact: { version: number; status: string; engine: string; expectedCases: number; cases: Record<string, unknown>[]; stage: string; observed?: Record<string, unknown> } = { version: 1, status: 'failed', engine: target.engine, expectedCases: MODES.length, cases: [], stage: 'startup' }
+    const ledgerDirectories: string[] = []
     let native: Connection | undefined
     let prisma: PrismaClient | undefined
     let activeFixtures: Snapshot | undefined
@@ -132,7 +135,7 @@ test('mandatory connected historical executor with real Serializable SQL and nat
             const root: HistoricalExecutorRoot = {
                 binding: fixture.binding, policy: fixture.policy, approval: { expected: fixture.expected, policy: fixture.policy, schema: { expectedSqlDatabaseFingerprint: sqlFingerprint, expectedPrismaFileFingerprint: prismaFingerprint } },
                 acquisitionRoot: { publicKeyPem: fixture.publicKeyPem, collectorId: 'historical-ci-test-collector', expectedSqlDatabaseFingerprint: sqlFingerprint, expectedPrismaFileFingerprint: prismaFingerprint, procedureFingerprint: fixture.procedureFingerprint, maxAgeMs: 60000 },
-                now: () => new Date(), lock: { tryAcquire: async () => ({ release: async () => {} }) }, queueIds: ['synthetic-main', 'synthetic-dlq'], maxGateAgeMs: 60000, maxPressure: 10,
+                authorization: undefined as never, now: () => new Date(), lock: { tryAcquire: async () => ({ release: async () => {} }) }, queueIds: ['synthetic-main', 'synthetic-dlq'], maxGateAgeMs: 60000, maxPressure: 10,
                 gates: {
                     ghost: async request => ({ ...stamp(request.artifactHash), recipients: [rows.message.toEmail!] }),
                     queues: async request => ({ ...stamp(request.artifactHash), queues: ['synthetic-main', 'synthetic-dlq'].map(id => ({ id, visible: mode === 'gate-refusal' ? 1 : 0, inflight: 0, delayed: 0 })) }),
@@ -223,6 +226,11 @@ test('mandatory connected historical executor with real Serializable SQL and nat
                     return counts(reader, rows, now)
                 } },
             }
+            const ledgerDirectory = await mkdtemp(resolve('.historical-ci-ledger-'))
+            ledgerDirectories.push(ledgerDirectory)
+            const scope = historicalAuthorizationScope(root)
+            provisionHistoricalAuthorization(ledgerDirectory, 'synthetic-ci-approval', scope)
+            root.authorization = openHistoricalAuthorizationLedger(ledgerDirectory, 'synthetic-ci-approval', scope)
             const acquisition = mode === 'unsigned' ? { ...fixture.acquisition, signature: Buffer.alloc(64) } : fixture.acquisition
             const receipt = await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(fixture.bytes), acquisition, deadlines: { idleMs: 10000, wholeMs: 60000, cleanupMs: 1000 } })
             const after = await snapshot(reader, fixtures)
@@ -255,7 +263,9 @@ test('mandatory connected historical executor with real Serializable SQL and nat
                 if (closed.some(result => result.status === 'rejected')) throw new Error('disconnect failed')
             }
             catch { artifact.status = 'failed'; artifact.stage = 'disconnect'; throw new Error('historical CI disconnect failed') }
-            finally { await mkdir('artifacts', { recursive: true }); await writeFile('artifacts/retention-historical-db-report.json', `${JSON.stringify(artifact, null, 2)}\n`) }
+            finally {
+                for (const path of ledgerDirectories) await rm(path, { recursive: true, force: true })
+                await mkdir('artifacts', { recursive: true }); await writeFile('artifacts/retention-historical-db-report.json', `${JSON.stringify(artifact, null, 2)}\n`) }
         }
     }
 })

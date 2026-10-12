@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { historicalAuthorizationScope } from './newsletter-retention-historical-authorization-ledger.js'
 import { adaptNewsletterRetentionHistoricalArchive, HISTORICAL_LIMITS } from './newsletter-retention-historical-archive.js'
 import { openNewsletterRetentionHistoricalArchiveStream } from './newsletter-retention-archive-stream-source.js'
 import { boundedHistoricalSource } from './newsletter-retention-historical-deadline.js'
@@ -534,21 +535,34 @@ function safeAddIntegers(left: number, right: number, field: string): number {
  * The only positive capability is private identity created after connected stream
  * verification + authenticated acquisition + exact independent wave authorization. */
 export function createInternalHistoricalRetentionExecutor(provided: HistoricalExecutorRoot) {
-    if (!provided?.acquisitionRoot || !provided.approval || !provided.gates || !provided.database || !provided.postcommit?.read) throw new Error('historical trusted adapters not configured')
-    for (const key of ['ghost', 'queues', 'proxy', 'pressure', 'schema', 'correlation'] as const) {
-        if (typeof provided.gates[key] !== 'function') throw new Error('historical trusted gate adapter missing')
+    // Read each caller property/port method once, preserving its original receiver.
+    // No spread of provided: it would invoke accessors again before overwriting them.
+    const authorization = provided?.authorization
+    const claim = authorization?.claim
+    const identity = authorization?.identity, scopeSha256 = authorization?.scopeSha256
+    if (typeof claim !== 'function') throw new Error('historical durable authorization missing')
+    if (typeof identity !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(identity)) throw new Error('historical durable authorization identity invalid')
+    const { binding, policy: suppliedPolicy, approval, acquisitionRoot, queueIds, maxPressure, maxGateAgeMs,
+        gates, lock, database, postcommit, now, confirmRollback } = provided
+    if (!acquisitionRoot || !approval || !gates || !database || !postcommit) throw new Error('historical trusted adapters not configured')
+    const { ghost, queues, proxy, pressure, schema, correlation } = gates
+    for (const method of [ghost, queues, proxy, pressure, schema, correlation]) {
+        if (typeof method !== 'function') throw new Error('historical trusted gate adapter missing')
     }
+    const tryAcquire = lock.tryAcquire, transaction = database.$transaction, read = postcommit.read
+    if (typeof read !== 'function') throw new Error('historical trusted adapters not configured')
     const root: HistoricalExecutorRoot = {
-        ...provided, binding: structuredClone(provided.binding), policy: structuredClone(provided.policy), approval: structuredClone(provided.approval),
-        acquisitionRoot: { ...provided.acquisitionRoot }, queueIds: [...provided.queueIds], gates: {
-            ghost: provided.gates.ghost.bind(provided.gates), queues: provided.gates.queues.bind(provided.gates),
-            proxy: provided.gates.proxy.bind(provided.gates), pressure: provided.gates.pressure.bind(provided.gates),
-            schema: provided.gates.schema.bind(provided.gates), correlation: provided.gates.correlation.bind(provided.gates),
-        },
-        lock: { tryAcquire: provided.lock.tryAcquire.bind(provided.lock) },
-        database: { $transaction: provided.database.$transaction.bind(provided.database) },
-        postcommit: { read: provided.postcommit.read.bind(provided.postcommit) },
+        authorization: { identity, scopeSha256, claim: claim.bind(authorization) },
+        binding: structuredClone(binding), policy: structuredClone(suppliedPolicy), approval: structuredClone(approval),
+        acquisitionRoot: structuredClone(acquisitionRoot), queueIds: [...queueIds], maxPressure, maxGateAgeMs,
+        now: now.bind(provided), confirmRollback: confirmRollback?.bind(provided),
+        gates: { ghost: ghost.bind(gates), queues: queues.bind(gates), proxy: proxy.bind(gates),
+            pressure: pressure.bind(gates), schema: schema.bind(gates), correlation: correlation.bind(gates) },
+        lock: { tryAcquire: tryAcquire.bind(lock) }, database: { $transaction: transaction.bind(database) },
+        postcommit: { read: read.bind(postcommit) },
     }
+    // Compare independent approval ONLY with the final private snapshot, before awaits.
+    if (scopeSha256 !== historicalAuthorizationScope(root)) throw new Error('historical durable authorization scope mismatch')
     assertHistoricalReadOnlyRoot(root)
     const policy = parseNewsletterRetentionPolicy(root.policy)
     const verifyAcquisition = createHistoricalAcquisitionVerifier(root.acquisitionRoot)
@@ -563,6 +577,11 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
         let transactionEntered = false
         try {
             if (!request || Object.keys(request).some(k => !['stream', 'acquisition', 'deadlines'].includes(k)) || waveConsumed) return receipt
+            for (const bytes of [request.acquisition.reportBytes, request.acquisition.configBytes, request.acquisition.attestationBytes]) {
+                if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > 1_048_576) throw new Error('historical acquisition byte capacity')
+            }
+            if (!(request.acquisition.signature instanceof Uint8Array) || request.acquisition.signature.byteLength !== 64) throw new Error('historical acquisition signature invalid')
+            const acquisition = { reportBytes: new Uint8Array(request.acquisition.reportBytes), configBytes: new Uint8Array(request.acquisition.configBytes), attestationBytes: new Uint8Array(request.acquisition.attestationBytes), signature: new Uint8Array(request.acquisition.signature) }
             lease = await root.lock.tryAcquire(NEWSLETTER_RETENTION_APPLY_LOCK_KEY)
             if (!lease || waveConsumed) return receipt
             receipt.stage = 'stream'
@@ -573,15 +592,21 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
             receipt.stage = 'admission'
             const expected = root.approval.expected
             assertHistoricalSelectedWave(root, selected)
-            const authentication = verifyAcquisition(request.acquisition, expected, root.now())
+            const authentication = verifyAcquisition(acquisition, expected, root.now())
             // Synchronous authenticated check-and-set before any gate/capability;
             // never return approval after gate failure or an unknown DB outcome.
             if (waveConsumed) return receipt
             waveConsumed = true
+            // Bound acknowledgement, not the underlying irreversible reservation.
+            // Never rearm on timeout/abort or late completion (including rejection).
+            if (await waitHistoricalAuthorizationClaim(root.authorization.claim, work) !== true) return receipt
+            work.check()
+            verifyAcquisition(acquisition, expected, root.now())
             const recipients = selected.records.flatMap(record => record.kind === 'newsletterMessages' ? [record.row.toEmail] : [])
             const gateRequest = Object.freeze({ artifactHash: selected.artifact.hash, batchGroupSha256: root.binding.batchGroupSha256, attemptId, signal: work.signal })
             receipt.stage = 'gates'
             await checkHistoricalGates(root, gateRequest, recipients)
+            verifyAcquisition(acquisition, expected, root.now())
             work.check()
             const capability = Object.freeze({})
             capabilities.set(capability, { selected, authentication, binding: root.binding, policy, approval: root.approval })
@@ -596,6 +621,7 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
                 if (!admitted || admitted.selected !== selected || admitted.authentication !== authentication) throw new Error('historical capability invalid or consumed')
                 work!.check()
                 await checkHistoricalGates(root, gateRequest, recipients)
+                verifyAcquisition(acquisition, expected, root.now())
                 const binding = selected.artifact.bindings[0], batch = selected.manifest.batches[0]
                 const parents = await tx.newsletterBatch.findMany({ where: { batchId: batch.batchId }, select: { id: true }, take: 2 })
                 if (parents.length !== 1 || parents[0].id !== binding.batchRecordId) throw new Error('historical exact parent set changed')
@@ -603,6 +629,7 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
                 callbackResult = await applyNewsletterRetentionBatch(tx, { policy, manifest: selected.manifest, artifact: selected.artifact }, 0, batch, binding.batchRecordId, selected.records, async () => {
                     work!.check()
                     await checkHistoricalGates(root, gateRequest, recipients)
+                    verifyAcquisition(acquisition, expected, root.now())
                     work!.check()
                 }, record => {
                     work!.check()
@@ -637,6 +664,21 @@ export function createInternalHistoricalRetentionExecutor(provided: HistoricalEx
         }
         return receipt
     }
+}
+
+/** The existing work controller carries the whole deadline and external abort.
+ * Late handlers stay attached. JS cannot interrupt a blocked synchronous FS syscall. */
+async function waitHistoricalAuthorizationClaim(claim: () => Promise<boolean>, work: ReturnType<typeof boundedHistoricalSource>): Promise<boolean> {
+    work.check()
+    return new Promise<boolean>((resolve, reject) => {
+        const finish = () => work.signal.removeEventListener('abort', abort)
+        const abort = () => { finish(); reject(new Error('historical authorization wait cancelled')) }
+        work.signal.addEventListener('abort', abort, { once: true })
+        Promise.resolve().then(() => { work.check(); return claim() }).then(
+            value => { finish(); resolve(value) },
+            error => { finish(); reject(error) },
+        )
+    })
 }
 
 async function deleteAndValidateCount(result: Promise<{ count: number }>, expected: number, field: string): Promise<number> {

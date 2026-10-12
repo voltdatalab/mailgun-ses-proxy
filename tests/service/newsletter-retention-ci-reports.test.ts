@@ -5,15 +5,17 @@ import { syntheticStartup, malformedStartupCases } from './retention-teardown-fi
 
 const operational = 'tests/service/newsletter-retention-operational-filesystem.test.ts'
 const historical = 'tests/service/newsletter-retention-historical-preparation.test.ts'
+const ledger = 'tests/service/newsletter-retention-historical-authorization-ledger.test.ts'
 function reports() {
     const assertions = [
         ...Array.from({ length: 15 }, (_, i) => ({ file: operational, fullName: i === 0 ? 'real private operational metadata filesystem rejects real foreign owner metadata when runner can create it' : `real private operational metadata filesystem case ${i}`, status: 'skipped' })),
         ...Array.from({ length: 7 }, (_, i) => ({ file: historical, fullName: `historical preparation real private report/config -> runtime adapter -> CLI: ${i}`, status: 'skipped' })),
         { file: historical, fullName: 'historical preparation pure case', status: 'passed' },
+        { file: ledger, fullName: 'synthetic durable ledger report schema case', status: 'passed' },
     ]
     const make = (safe: boolean) => ({
-        numTotalTests: 23, numPassedTests: safe ? 23 : 1, numFailedTests: 0, numPendingTests: safe ? 0 : 22, numTodoTests: 0,
-        testResults: [operational, historical].map(file => ({ name: `${safe ? '/repo' : '/checkout'}/${file}`, assertionResults: assertions.filter(a => a.file === file).map(a => ({ fullName: a.fullName, status: safe ? 'passed' : a.status })) })),
+        numTotalTests: 24, numPassedTests: safe ? 24 : 2, numFailedTests: 0, numPendingTests: safe ? 0 : 22, numTodoTests: 0,
+        testResults: [operational, historical, ledger].map(file => ({ name: `${safe ? '/repo' : '/checkout'}/${file}`, assertionResults: assertions.filter(a => a.file === file).map(a => ({ fullName: a.fullName, status: safe ? 'passed' : a.status })) })),
     })
     // Synthetic report schema, not a real hosted root/teardown certification.
     return { database: make(false), safe: { ...make(true), retentionSafeRunner: { foreignOwner: { uid: 1, gid: 1 }, uidMap: '0 0 2\n', gidMap: '0 0 2\n', isolated: true, exitCode: 0, bootstrapTeardown: { version: 1, verified: true, descendantsGone: true, timeoutMs: 900, elapsedMs: 910, started: syntheticStartup() } } } }
@@ -33,16 +35,25 @@ describe('required CI retention report reconciliation', () => {
     it('synthetic valid schema reconciles all 22 pending identities and retains all DB assertions', () => {
         const { database, safe } = reports()
         const merged = mergeRetentionReports(database, safe)
-        expect(merged.numPassedTests).toBe(23)
+        expect(merged.numPassedTests).toBe(24)
         expect(merged.numPendingTests).toBe(0)
         expect(merged.retentionCoverage.replaced.length).toBe(22)
-        expect(merged.testResults.flatMap((r: { assertionResults: unknown[] }) => r.assertionResults)).toHaveLength(23)
+        expect(merged.testResults.flatMap((r: { assertionResults: unknown[] }) => r.assertionResults)).toHaveLength(24)
     })
     it('preserves distinct ordinary parameterized assertions even when Vitest renders identical titles', () => {
         const { database, safe } = reports()
         database.testResults.push({ name: '/checkout/tests/lib/event-processor.test.ts', assertionResults: [{ fullName: 'parameterized case', status: 'passed' }, { fullName: 'parameterized case', status: 'passed' }] })
         database.numTotalTests += 2; database.numPassedTests += 2
-        expect(mergeRetentionReports(database, safe).numPassedTests).toBe(25)
+        expect(mergeRetentionReports(database, safe).numPassedTests).toBe(26)
+    })
+    it('requires every ordinary ledger assertion to execute in the isolated suite too, without skip reconciliation', () => {
+        const { database, safe } = reports()
+        const suite = safe.testResults.pop()!
+        safe.numTotalTests--; safe.numPassedTests--
+        expect(() => mergeRetentionReports(database, safe)).toThrow('durable ledger assertions')
+        safe.testResults.push(suite); safe.numTotalTests++; safe.numPassedTests++
+        database.testResults[2].assertionResults[0].status = 'skipped'; database.numPassedTests--; database.numPendingTests++
+        expect(() => mergeRetentionReports(database, safe)).toThrow('uncovered skipped assertion')
     })
     // These reports are synthetic gate fixtures, not hosted capability proof.
     it.each(malformedStartupCases)('rejects synthetic malformed startup %s before declaring success', (name, mutate) => {

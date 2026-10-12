@@ -1,14 +1,18 @@
-import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto'
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { HISTORICAL_ACQUISITION_DOMAIN } from '@/service/newsletter-retention-historical-acquisition'
 import { createInternalHistoricalRetentionExecutor } from '@/service/newsletter-retention-applier'
 import type { HistoricalExecutorRoot } from '@/service/newsletter-retention-historical-executor-contract'
 import { operationalChainBinding } from '@/service/newsletter-retention-operational-readback'
 import { gzipSync, createGzip } from 'node:zlib'
 import { Readable } from 'node:stream'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { openNewsletterRetentionHistoricalArchiveFromEnvironment } from '@/service/newsletter-retention-operational-metadata-source'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { historicalAuthorizationScope, provisionHistoricalAuthorization, openHistoricalAuthorizationLedger } from '@/service/newsletter-retention-historical-authorization-ledger'
+const ledgerDirectories: string[] = []
+afterEach(async () => { for (const path of ledgerDirectories.splice(0)) await rm(path, { recursive: true, force: true }) })
 import { adaptNewsletterRetentionHistoricalArchive, validateHistoricalArchiveCapacity, HISTORICAL_COLUMNS, type HistoricalArchiveChain, type HistoricalArchiveBinding } from '@/service/newsletter-retention-historical-archive'
 import { executeNewsletterRetentionCli, type NewsletterRetentionCliDependencies } from '@/service/newsletter-retention-cli'
 import { openNewsletterRetentionHistoricalArchiveStream } from '@/service/newsletter-retention-archive-stream-source'
@@ -119,10 +123,12 @@ function environment() {
 }
 
 describe('historical streaming adapter -> executor preparation -> admission refusal', () => {
-    it.each([...Object.keys(failedReadbacks), 'distinct-schema', 'empty-flags', 'swap-schema', 'wrong-prisma', 'missing-sql-root', 'missing-prisma-root', 'missing-sql-approval', 'missing-prisma-approval', 'malformed-sql', 'malformed-prisma', 'unapproved-sql', 'unapproved-prisma', 'concurrent-ghost', 'concurrent-success', 'concurrent-unsigned', 'concurrent-overlap-ghost', 'success', 'unsigned', 'wrong-key', 'wrapper', 'schema-attestation', 'prisma-attestation', 'policy', 'ghost', 'duplicate-ghost', 'dlq', 'missing-queue', 'unknown-queue', 'stale', 'future', 'pressure', 'live-schema', 'late', 'parent', 'content', 'count', 'postcommit', 'postcommit-throw', 'commit-unknown', 'rollback-confirmed', 'release', 'stall-prefix', 'stall-base', 'stall-delta', 'stall-trailer', 'abort', 'cleanup-stall', 'stale-afterstream', 'scope', 'null-dlq', 'precommit-late', 'postconditions', 'abort-beforemutation', 'clone-capability', 'self-attestation', 'acquisition-digest', 'binding-artifact', 'root-mutation', 'skip-callback', 'result-clone', 'wrong-rollback', 'live-cap'] as const)('integrated authenticated historical executor: %s', async (mode) => {
+    it.each([...['before', 'inside', 'precommit'].flatMap(phase => ['ghost', 'queues', 'proxy', 'pressure', 'schema', 'correlation'].flatMap(collector => ['unsafe-safe', 'safe-unsafe'].map(direction => `snapshot-${phase}-${collector}-${direction}`))), ...Object.keys(failedReadbacks), 'distinct-schema', 'empty-flags', 'swap-schema', 'wrong-prisma', 'missing-sql-root', 'missing-prisma-root', 'missing-sql-approval', 'missing-prisma-approval', 'malformed-sql', 'malformed-prisma', 'unapproved-sql', 'unapproved-prisma', 'missing-ledger', 'ledger-scope-drift', 'ledger-id', 'process-replay', 'claim-deadline-late-success', 'claim-deadline-late-reject', 'claim-abort-late-success', 'claim-abort-late-reject', 'capture-once', 'capture-scope-mismatch', 'ledger-unavailable', 'ledger-refused', 'freshness-aftergates', 'substitution-aftergates', 'poison-aftergates', 'concurrent-newfactory-success', 'concurrent-newfactory-ghost', 'root-gate-substitution', 'malformed-bytes', 'concurrent-ghost', 'concurrent-success', 'concurrent-unsigned', 'concurrent-overlap-ghost', 'success', 'unsigned', 'wrong-key', 'wrapper', 'schema-attestation', 'prisma-attestation', 'policy', 'ghost', 'duplicate-ghost', 'dlq', 'missing-queue', 'unknown-queue', 'stale', 'future', 'pressure', 'live-schema', 'late', 'parent', 'content', 'count', 'postcommit', 'postcommit-throw', 'commit-unknown', 'rollback-confirmed', 'release', 'stall-prefix', 'stall-base', 'stall-delta', 'stall-trailer', 'abort', 'cleanup-stall', 'stale-afterstream', 'scope', 'null-dlq', 'precommit-late', 'postconditions', 'abort-beforemutation', 'clone-capability', 'self-attestation', 'acquisition-digest', 'binding-artifact', 'root-mutation', 'skip-callback', 'result-clone', 'wrong-rollback', 'live-cap'] as const)('integrated authenticated historical executor: %s', async (mode) => {
         const f = fixture(), env = environment()
         // Test-only random principal. Never provision these keys in application/runtime.
-        const keys = generateKeyPairSync('ed25519')
+        const childDirectory = mode === 'process-replay' ? process.env.RETENTION_SYNTHETIC_REPLAY_DIRECTORY : undefined
+        const privateKey = childDirectory ? createPrivateKey(await readFile(join(childDirectory, 'test-private-key.pem'))) : undefined
+        const keys = privateKey ? { privateKey, publicKey: createPublicKey(privateKey) } : generateKeyPairSync('ed25519')
         const selected = await adaptNewsletterRetentionHistoricalArchive(f.chain, f.binding, policy)
         const configBytes = Buffer.from(JSON.stringify({ expectedContainerId: SCHEMA, expectedImageId: `sha256:${SCHEMA}` }))
         const expected = { ...operationalChainBinding(f.binding), configSha256: hash(configBytes), procedureFingerprint: PROCEDURE,
@@ -162,7 +168,7 @@ describe('historical streaming adapter -> executor preparation -> admission refu
         const root: HistoricalExecutorRoot = {
             binding: f.binding, policy, approval: { expected, policy: mode === 'policy' ? { ...policy, maxMessages: 1 } : policy, schema: { expectedSqlDatabaseFingerprint: SQL_SCHEMA, expectedPrismaFileFingerprint: SCHEMA } },
             acquisitionRoot: { publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), collectorId: 'synthetic-approved-collector', expectedSqlDatabaseFingerprint: SQL_SCHEMA, expectedPrismaFileFingerprint: SCHEMA, procedureFingerprint: PROCEDURE, maxAgeMs: 60_000 },
-            now: env.deps.now, lock: { tryAcquire: async () => ({ release }) },
+            authorization: undefined as never, now: env.deps.now, lock: { tryAcquire: async () => ({ release }) },
             queueIds: ['main', 'dlq'], maxPressure: 10, maxGateAgeMs: 60_000,
             gates: {
                 ghost: async () => { gateCalls++; if (mode === 'abort-beforemutation' && gateCalls === 3) controller.abort(); return { ...baseObservation, recipients: mode === 'ghost' ? ['different@example.invalid'] : mode === 'duplicate-ghost' ? [message.toEmail, message.toEmail] : [message.toEmail] } },
@@ -186,11 +192,24 @@ describe('historical streaming adapter -> executor preparation -> admission refu
         if (mode === 'malformed-prisma') root.approval.schema.expectedPrismaFileFingerprint = 'not-a-hash'
         if (mode === 'unapproved-sql') root.acquisitionRoot.expectedSqlDatabaseFingerprint = PROCEDURE
         if (mode === 'unapproved-prisma') root.acquisitionRoot.expectedPrismaFileFingerprint = SQL_SCHEMA
+        const ledgerDirectory = childDirectory ?? await mkdtemp(join(process.env.RETENTION_SAFE_FIXTURE_ROOT ?? process.cwd(), '.historical-ledger-'))
+        if (!childDirectory) ledgerDirectories.push(ledgerDirectory)
+        const scope = historicalAuthorizationScope(root)
+        if (!childDirectory) provisionHistoricalAuthorization(ledgerDirectory, 'synthetic-approval', scope)
+        root.authorization = openHistoricalAuthorizationLedger(ledgerDirectory, 'synthetic-approval', scope)
         if (invalidRoot) {
             expect(() => createInternalHistoricalRetentionExecutor(root)).toThrow('schema commitments')
             expect(env.transaction).not.toHaveBeenCalled(); expect(order).toEqual([])
             expect(readback).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled(); return
         }
+        if (['missing-ledger', 'ledger-scope-drift', 'ledger-id'].includes(mode)) {
+            if (mode === 'missing-ledger') root.authorization = undefined as never
+            if (mode === 'ledger-scope-drift') root.queueIds = ['changed-queue', 'changed-dlq']
+            if (mode === 'ledger-id') root.authorization = { ...root.authorization, identity: '../invalid' }
+            expect(() => createInternalHistoricalRetentionExecutor(root)).toThrow('historical durable authorization')
+            expect(gateCalls).toBe(0); expect(env.transaction).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled(); return
+        }
+        const newFactory = mode.startsWith('concurrent-newfactory-')
         const concurrent = mode.startsWith('concurrent-')
         const overlap = mode === 'concurrent-overlap-ghost'
         let heldLeases = 0, peakLeases = 0, acquireCalls = 0
@@ -220,10 +239,151 @@ describe('historical streaming adapter -> executor preparation -> admission refu
             root.gates.ghost = async request => {
                 const observation = await ghost(request)
                 firstGateEntered?.()
-                return { ...observation, recipients: (mode === 'concurrent-ghost' || overlap) && gateCalls === 1 ? ['different@example.invalid'] : [message.toEmail] }
+                return { ...observation, recipients: (mode === 'concurrent-ghost' || mode === 'concurrent-newfactory-ghost' || overlap) && gateCalls === 1 ? ['different@example.invalid'] : [message.toEmail] }
             }
         }
+        if (mode.startsWith('snapshot-')) {
+            const [, phase, name, direction] = mode.split('-')
+            const target = name as keyof typeof root.gates
+            const round = phase === 'before' ? 1 : phase === 'inside' ? 2 : 3
+            const original = root.gates[target].bind(root.gates)
+            let calls = 0
+            let observation: Record<string, unknown> | undefined
+            let safe: Record<string, unknown> | undefined
+            const unsafe = (value: Record<string, unknown>) => {
+                if (target === 'ghost') value.recipients = ['different@example.invalid']
+                if (target === 'queues') (value.queues as Array<{ visible: number }>)[1].visible = 1
+                if (target === 'proxy') value.accepting = false
+                if (target === 'pressure') value.activeQueries = 11
+                if (target === 'schema') value.liveDatabaseFingerprint = PROCEDURE
+                if (target === 'correlation') value.lateEvents = 1
+            }
+            Object.assign(root.gates, { [target]: (async (request: Parameters<typeof original>[0]) => {
+                const value = await original(request)
+                if (++calls === round) {
+                    observation = value as unknown as Record<string, unknown>
+                    safe = structuredClone(observation)
+                    if (direction === 'unsafe') unsafe(observation)
+                }
+                return value
+            }) })
+            const delay = target === 'schema' ? 'correlation' : 'schema'
+            const delayed = root.gates[delay].bind(root.gates)
+            Object.assign(root.gates, { [delay]: (async (request: Parameters<typeof delayed>[0]) => {
+                const value = await delayed(request)
+                await new Promise<void>(resolve => setImmediate(resolve))
+                if (observation) {
+                    if (direction === 'unsafe') Object.assign(observation, safe)
+                    else unsafe(observation)
+                    observation = undefined
+                }
+                return value
+            }) })
+        }
+        if (mode === 'ledger-unavailable') root.authorization = { ...root.authorization, claim: async () => { throw new Error('private ledger unavailable') } }
+        if (mode === 'ledger-refused') root.authorization = { ...root.authorization, claim: async () => false }
+        if (['freshness-aftergates', 'substitution-aftergates', 'poison-aftergates'].includes(mode)) {
+            const ghost = root.gates.ghost
+            root.gates.ghost = async request => {
+                if (mode === 'poison-aftergates') { acquisition.reportBytes.fill(0); acquisition.attestationBytes.fill(0); acquisition.signature.fill(0) }
+                else {
+                    env.setNow('2026-10-07T14:01:01.000Z')
+                    baseObservation.checkedAt = '2026-10-07T14:01:01.000Z'
+                    if (mode === 'substitution-aftergates') {
+                        const newReport = Buffer.from(JSON.stringify({ ...report, timestampUtc: '2026-10-07T14:01:00.0000000Z' }))
+                        const newAttestation = Buffer.from(JSON.stringify({ ...JSON.parse(attestationBytes.toString()), reportSha256: hash(newReport) }))
+                        Object.assign(acquisition, { reportBytes: newReport, attestationBytes: newAttestation, signature: sign(null, Buffer.concat([Buffer.from(HISTORICAL_ACQUISITION_DOMAIN), newAttestation]), keys.privateKey) })
+                    }
+                }
+                return ghost(request)
+            }
+        }
+        if (mode === 'root-gate-substitution') {
+            const receiver = root.gates
+            for (const name of ['ghost', 'queues', 'proxy', 'pressure', 'schema', 'correlation'] as const) {
+                const original = receiver[name].bind(receiver)
+                Object.assign(receiver, { [name]: function (this: typeof receiver, request: Parameters<typeof original>[0]) {
+                    expect(this).toBe(receiver)
+                    return original(request)
+                } })
+            }
+            const ledger = root.authorization
+            const provisioned = { ...ledger, claim: function (this: typeof ledger) { expect(this).toBe(provisioned); return ledger.claim() } }
+            root.authorization = provisioned
+        }
+        if (mode.startsWith('claim-')) {
+            const ledger = root.authorization
+            let acknowledge!: (value: boolean) => void, rejectAcknowledgement!: (error: Error) => void
+            const pending = new Promise<boolean>((resolve, reject) => { acknowledge = resolve; rejectAcknowledgement = reject })
+            const claim = vi.fn(async () => {
+                expect(await ledger.claim()).toBe(true) // Real irreversible Linux reservation BEFORE delayed acknowledgement.
+                if (mode.startsWith('claim-abort-')) controller.abort()
+                return pending
+            })
+            root.authorization = { ...ledger, claim }
+            const collectors = Object.values(root.gates).map(method => vi.fn(method))
+            for (const [index, name] of Object.keys(root.gates).entries()) Object.assign(root.gates, { [name]: collectors[index] })
+            const execute = createInternalHistoricalRetentionExecutor(root)
+            const iterator = chunks(envelope(fixture()))[Symbol.asyncIterator]()
+            const close = vi.fn(async () => iterator.return?.())
+            const stream = { [Symbol.asyncIterator]: () => ({ next: () => iterator.next(), return: close }) }
+            let timedOut = false
+            const result = await Promise.race([
+                execute({ stream, acquisition, deadlines: { signal: controller.signal, wholeMs: 20, cleanupMs: 10 } }),
+                new Promise<null>(resolve => setTimeout(() => { timedOut = true; resolve(null) }, 150)),
+            ])
+            // Release only AFTER observing cleanup: the old executor needs this to settle.
+            const released = release.mock.calls.length, closed = close.mock.calls.length
+            const reopened = openHistoricalAuthorizationLedger(ledgerDirectory, 'synthetic-approval', scope)
+            root.authorization = reopened
+            const replayBeforeAcknowledgement = await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(envelope(fixture())), acquisition })
+            if (mode.endsWith('reject')) rejectAcknowledgement(new Error('late synthetic acknowledgement failure'))
+            else acknowledge(true)
+            await new Promise<void>(resolve => setImmediate(resolve))
+            expect(timedOut).toBe(false)
+            expect(result?.state).toBe('refused_before_transaction'); expect(result?.stage).toBe('admission')
+            expect(result?.cleanupFailures).toEqual([])
+            expect(replayBeforeAcknowledgement.state).toBe('refused_before_transaction'); expect(replayBeforeAcknowledgement.stage).toBe('admission')
+            for (const collector of collectors) expect(collector).not.toHaveBeenCalled()
+            expect(released).toBe(1); expect(closed).toBe(1); expect(claim).toHaveBeenCalledOnce()
+            expect((await execute({ stream: chunks(envelope(fixture())), acquisition })).stage).toBe('lock')
+            root.authorization = openHistoricalAuthorizationLedger(ledgerDirectory, 'synthetic-approval', scope)
+            expect((await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(envelope(fixture())), acquisition })).stage).toBe('admission')
+            expect(await root.authorization.claim()).toBe(false)
+            expect(gateCalls).toBe(0); expect(env.transaction).not.toHaveBeenCalled(); expect(order).toEqual([]); expect(readback).not.toHaveBeenCalled()
+            return
+        }
+        if (mode.startsWith('capture-')) {
+            const ledger = root.authorization
+            let reads = 0
+            const port = { identity: ledger.identity, scopeSha256: ledger.scopeSha256, get claim() {
+                reads++
+                if (mode === 'capture-scope-mismatch' || reads > 1) root.queueIds = ['different-main', 'different-dlq']
+                return function (this: typeof port) { expect(this).toBe(port); return ledger.claim() }
+            } }
+            Object.defineProperty(root, 'authorization', { configurable: true, get: () => port })
+            if (mode === 'capture-scope-mismatch') {
+                expect(() => createInternalHistoricalRetentionExecutor(root)).toThrow('historical durable authorization scope mismatch')
+                expect(reads).toBe(1); expect(await ledger.claim()).toBe(true)
+                expect(gateCalls).toBe(0); expect(env.transaction).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled(); return
+            }
+            const rootReads: Record<string, number> = {}
+            for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(root))) {
+                Object.defineProperty(root, name, { configurable: true, get: () => {
+                    rootReads[name] = (rootReads[name] ?? 0) + 1
+                    return descriptor.get ? descriptor.get.call(root) : descriptor.value
+                } })
+            }
+            const execute = createInternalHistoricalRetentionExecutor(root)
+            expect(reads).toBe(1)
+            expect(Object.values(rootReads).every(count => count === 1)).toBe(true)
+            expect(Object.keys(rootReads).sort()).toEqual(Object.keys(root).sort())
+            expect((await execute({ stream: chunks(envelope(fixture())), acquisition })).state).toBe('committed_readback_ok')
+            expect(root.queueIds).toEqual(['main', 'dlq']); expect(reads).toBe(1)
+            expect(readback).toHaveBeenCalledOnce(); return
+        }
         const executor = createInternalHistoricalRetentionExecutor(root)
+        if (mode === 'root-gate-substitution') { root.gates = Object.fromEntries(Object.keys(root.gates).map(key => [key, async () => { throw new Error('substituted collector') }])) as unknown as HistoricalExecutorRoot['gates']; root.authorization = { ...root.authorization, claim: async () => { throw new Error('substituted ledger') } } }
         if (concurrent) {
             const iterated = [0, 0], closed = [false, false]
             const streams = [0, 1].map(index => (async function* () {
@@ -234,14 +394,14 @@ describe('historical streaming adapter -> executor preparation -> admission refu
                 } finally { closed[index] = true }
             })())
             const first = executor({ stream: streams[0], acquisition: mode === 'concurrent-unsigned' ? { ...acquisition, signature: Buffer.alloc(64) } : acquisition })
-            const second = executor({ stream: streams[1], acquisition: { ...acquisition } })
+            const second = (newFactory ? createInternalHistoricalRetentionExecutor(root) : executor)({ stream: streams[1], acquisition: { ...acquisition } })
             // Both entered before authentication; second is genuinely queued, not
             // invoked sequentially after the first result or consumption check.
             expect(acquireCalls).toBe(2)
             if (!overlap) expect(leaseOrder).toEqual(['request-1', 'acquire-1', 'request-2'])
             const results = await Promise.all([first, second])
-            const success = mode === 'concurrent-success' || mode === 'concurrent-unsigned'
-            expect(results.map(result => result.state)).toEqual(mode === 'concurrent-success'
+            const success = mode === 'concurrent-success' || mode === 'concurrent-newfactory-success' || mode === 'concurrent-unsigned'
+            expect(results.map(result => result.state)).toEqual((mode === 'concurrent-success' || mode === 'concurrent-newfactory-success')
                 ? ['committed_readback_ok', 'refused_before_transaction']
                 : mode === 'concurrent-unsigned' ? ['refused_before_transaction', 'committed_readback_ok']
                     : ['refused_before_transaction', 'refused_before_transaction'])
@@ -252,9 +412,9 @@ describe('historical streaming adapter -> executor preparation -> admission refu
             expect(heldLeases).toBe(0)
             expect(peakLeases).toBe(overlap ? 2 : 1)
             if (!overlap) expect(leaseOrder).toEqual(['request-1', 'acquire-1', 'request-2', 'release-1', 'acquire-2', 'release-2'])
-            expect(iterated).toEqual([1, mode === 'concurrent-unsigned' || overlap ? 1 : 0])
-            expect(closed).toEqual([true, mode === 'concurrent-unsigned' || overlap])
-            expect(results[1].stage).toBe(mode === 'concurrent-unsigned' ? 'postcommit' : overlap ? 'admission' : 'lock')
+            expect(iterated).toEqual([1, mode === 'concurrent-unsigned' || overlap || newFactory ? 1 : 0])
+            expect(closed).toEqual([true, mode === 'concurrent-unsigned' || overlap || newFactory])
+            expect(results[1].stage).toBe(mode === 'concurrent-unsigned' ? 'postcommit' : overlap || newFactory ? 'admission' : 'lock')
             if (!success) expect(gateCalls).toBe(1)
             expect(results.every(result => result.cleanupFailures.length === 0)).toBe(true)
             // Authentication failure does not consume, authenticated gate refusal
@@ -283,9 +443,32 @@ describe('historical streaming adapter -> executor preparation -> admission refu
         const request = { stream, acquisition, deadlines: { signal: controller.signal, idleMs: 20, wholeMs: 1000, cleanupMs: 10 } }
         if (mode === 'clone-capability') Object.assign(request, { capability: JSON.parse(JSON.stringify({ authenticated: true, artifactHash: selected.artifact.hash })) })
         if (mode === 'self-attestation') Object.assign(request, { trusted: true, collectionAuthenticated: true })
+        if (mode === 'malformed-bytes') request.acquisition = { ...acquisition, reportBytes: Array.from(acquisition.reportBytes) as never }
         const result = await executor(request)
         if (timeout) clearTimeout(timeout)
-        const committed = ['distinct-schema', 'empty-flags', 'success', 'postcommit', 'postcommit-throw', 'release', 'cleanup-stall', 'root-mutation'].includes(mode)
+        if (mode === 'process-replay') {
+            if (childDirectory) {
+                expect(result.state).toBe('refused_before_transaction'); expect(result.stage).toBe('admission')
+                expect(gateCalls).toBe(0); expect(env.transaction).not.toHaveBeenCalled(); expect(order).toEqual([]); expect(readback).not.toHaveBeenCalled()
+            } else {
+                expect(result.state).toBe('committed_readback_ok')
+                await writeFile(join(ledgerDirectory, 'test-private-key.pem'), keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o400, flag: 'wx' })
+                const child = spawnSync(process.execPath, [resolve('node_modules/vitest/vitest.mjs'), '--run', 'tests/service/newsletter-retention-historical-preparation.test.ts', '-t', 'integrated authenticated historical executor: process-replay$', '--reporter=json'], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL', env: { NODE_ENV: 'test', TMPDIR: process.env.TMPDIR ?? ledgerDirectory, RETENTION_SAFE_FIXTURE_ROOT: process.env.RETENTION_SAFE_FIXTURE_ROOT ?? process.cwd(), RETENTION_SYNTHETIC_REPLAY_DIRECTORY: ledgerDirectory, PATH: '/none' }, maxBuffer: 4 * 1024 * 1024 })
+                expect(child.error).toBeUndefined(); expect(child.signal).toBeNull(); expect(child.status, child.stderr).toBe(0)
+                const report = JSON.parse(child.stdout)
+                expect(report.numPassedTests).toBe(1); expect(report.numFailedTests).toBe(0)
+                expect(report.testResults.flatMap((value: { assertionResults: Array<{ title: string; status: string }> }) => value.assertionResults).filter((value: { status: string }) => value.status === 'passed').map((value: { title: string }) => value.title)).toEqual(['integrated authenticated historical executor: process-replay'])
+            }
+            return
+        }
+        const snapshotUnsafe = mode.startsWith('snapshot-') && mode.endsWith('unsafe-safe')
+        if (mode.startsWith('snapshot-')) {
+            expect(result.state).toBe(snapshotUnsafe ? (mode.includes('-before-') ? 'refused_before_transaction' : 'commit_unknown') : 'committed_readback_ok')
+            expect(readback).toHaveBeenCalledTimes(snapshotUnsafe ? 0 : 1)
+            expect(order).toEqual(snapshotUnsafe ? [] : ['newsletterNotifications', 'newsletterErrors', 'newsletterMessages', 'newsletterBatch'])
+            return
+        }
+        const committed = ['distinct-schema', 'empty-flags', 'success', 'postcommit', 'postcommit-throw', 'release', 'cleanup-stall', 'root-mutation', 'poison-aftergates', 'root-gate-substitution'].includes(mode)
         expect(result.state).toBe(committed ? (mode.startsWith('postcommit') ? 'committed_readback_failed' : 'committed_readback_ok') : mode === 'rollback-confirmed' ? 'rollback_confirmed' : ['count', 'content', 'parent', 'commit-unknown', 'precommit-late', 'postconditions', 'abort-beforemutation', 'skip-callback', 'result-clone', 'wrong-rollback', 'live-cap'].includes(mode) ? 'commit_unknown' : 'refused_before_transaction')
         expect(readback).toHaveBeenCalledTimes(committed ? 1 : 0)
         if (Object.hasOwn(failedReadbacks, mode) || ['schema-attestation', 'prisma-attestation', 'swap-schema', 'wrong-prisma', 'unsigned'].includes(mode)) {
@@ -295,14 +478,27 @@ describe('historical streaming adapter -> executor preparation -> admission refu
         }
         if (committed) expect(order).toEqual(['newsletterNotifications', 'newsletterErrors', 'newsletterMessages', 'newsletterBatch'])
         if (mode === 'release') expect(result.cleanupFailures).toContain('lock_release_failed')
-        expect(release).toHaveBeenCalledTimes(['clone-capability', 'self-attestation'].includes(mode) ? 0 : 1)
+        expect(release).toHaveBeenCalledTimes(['clone-capability', 'self-attestation', 'malformed-bytes'].includes(mode) ? 0 : 1)
         if (['ghost', 'late', 'precommit-late', 'abort-beforemutation', 'parent', 'content', 'live-cap'].includes(mode) || mode.startsWith('stall-') || mode === 'abort') expect(order).toEqual([])
         if (mode.startsWith('stall-') || mode === 'abort' || mode === 'cleanup-stall') expect(cleanup).toHaveBeenCalledOnce()
         if (mode === 'cleanup-stall') expect(result.cleanupFailures).toContain('source_cleanup_failed')
         expect(JSON.stringify(result)).not.toMatch(/example\.invalid|synthetic-parent|private .*failure|synthetic-group/)
+        if (['success', 'ghost', 'rollback-confirmed', 'commit-unknown', 'abort-beforemutation', 'precommit-late', 'postcommit'].includes(mode)) {
+            const callsBeforeReplay = gateCalls
+            const transactionsBeforeReplay = env.transaction.mock.calls.length
+            root.authorization = openHistoricalAuthorizationLedger(ledgerDirectory, 'synthetic-approval', scope)
+            const replay = await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(envelope(fixture())), acquisition })
+            expect(replay.state).toBe('refused_before_transaction'); expect(replay.stage).toBe('admission')
+            expect(gateCalls).toBe(callsBeforeReplay); expect(env.transaction).toHaveBeenCalledTimes(transactionsBeforeReplay)
+        }
+        if (['unsigned', 'wrong-key', 'malformed-bytes'].includes(mode)) {
+            const signed = { ...acquisition, signature: sign(null, Buffer.concat([Buffer.from(HISTORICAL_ACQUISITION_DOMAIN), attestationBytes]), keys.privateKey) }
+            expect((await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(envelope(fixture())), acquisition: signed })).state).toBe('committed_readback_ok')
+        }
         if (mode === 'success') {
             // Fresh clocks and a new stream cannot replay the consumed acquisition/wave.
             expect((await executor({ stream: chunks(envelope(fixture())), acquisition: { ...acquisition } })).state).toBe('refused_before_transaction')
+            expect((await createInternalHistoricalRetentionExecutor(root)({ stream: chunks(envelope(fixture())), acquisition: { ...acquisition } })).state).toBe('refused_before_transaction')
         }
     })
     it.each(['baseRows', 'deltaRows'] as const)('bounds a stalled direct historical chain %s, not only the envelope adapter', async (part) => {
