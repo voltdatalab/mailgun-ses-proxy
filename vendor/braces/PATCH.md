@@ -3,8 +3,10 @@
 Upstream: https://github.com/micromatch/braces/tree/3.0.3 (MIT; LICENSE retained).
 Advisory: https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
 
-As of 2026-10-15, upstream has no patched release. This source copy preserves
-upstream package identity and API, adding a fixed nesting limit of 128 to both
+As of 2026-10-15, upstream has no patched release. This source copy is explicitly identified as
+`@nucleotech/braces@3.0.3-patch.1` to distinguish it from the vulnerable upstream
+release. It preserves
+upstream API, adding a fixed nesting limit of 128 to both
 parser stack pushes and the compile, expand and stringify AST walkers. Excessive
 nesting raises a deliberate RangeError before recursive stack exhaustion. The
 limit also applies to directly supplied ASTs and cannot be disabled by options.
