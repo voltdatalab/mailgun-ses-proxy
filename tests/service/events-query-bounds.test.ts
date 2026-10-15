@@ -35,6 +35,6 @@ it('hydrates only selected IDs, restores their order, and omits campaign content
  hydrate.mockResolvedValue([row('a'),row('b')])
  const result=await getEmailEvents(params)
  expect(result.items.map(item=>item.id)).toEqual(['b-b','a-a'])
- expect(hydrate.mock.calls.at(-1)[0].where).toEqual({id:{in:['b','a']}})
- expect(JSON.stringify(hydrate.mock.calls.at(-1)[0])).not.toContain('contents')
+ expect(hydrate.mock.calls.at(-1)![0].where).toEqual({id:{in:['b','a']}})
+ expect(JSON.stringify(hydrate.mock.calls.at(-1)![0])).not.toContain('contents')
 })
