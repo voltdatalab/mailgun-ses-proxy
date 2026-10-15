@@ -33,6 +33,7 @@ export default defineConfig([
     "dist/**",
     "coverage/**",
     "lib/generated/**",
+    "vendor/**",
     "prisma/generated/**",
   ]),
 ])

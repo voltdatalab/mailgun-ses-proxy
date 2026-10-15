@@ -156,3 +156,18 @@ Currently in production at [typetale.app](https://typetale.app).
 **License**: AGPL-3
 
 AGPL-3
+
+### Bounded newsletter analytics reads
+
+The Mailgun events endpoint selects IDs through the existing
+`idx_notifications_type_created_id` index, one ordered stream per event type,
+then fetches only the selected event payloads. MySQL limits the ID query to two
+seconds. Only one analytics read is admitted per application process; concurrent
+polls receive HTTP 503 with `Retry-After: 5`. Sending and event ingestion are not
+subject to that gate. Legacy offsets are limited to 10,000; use the returned
+cursor for later pages. No event history is deleted by this change.
+
+The regression fixture can be run against an isolated MySQL 8.4 database named
+`fixture` on localhost:39485 with `RUN_EVENTS_MYSQL=true npm run test:run --
+tests/service/events-query-mysql.test.ts`. The fixture connection credentials are
+test-only and defined in that test; never point it at production.

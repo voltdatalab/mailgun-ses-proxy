@@ -1,5 +1,6 @@
 import { EventsProps, QueryParams } from "@/types/default"
 import { formatAsMailgunEvent } from "../../lib/core/aws-utils"
+import { Prisma } from "../../lib/generated"
 import { prisma } from "../database/db"
 
 type EventsCursor = {
@@ -81,61 +82,75 @@ function eventTypes(type: string) {
     return type.split(/\s+OR\s+/i).map(value => value.trim().toLowerCase())
 }
 
-/** Retrieves events using ingestion-time (`created`) filters, as required by Ghost analytics. */
-export async function getEmailEvents(params: EventsProps) {
-    const timeRange = {
-        gt: new Date(params.begin * 1000),
-        lt: new Date(params.end * 1000),
-    }
+export class AnalyticsBusyError extends Error {
+    constructor() { super("Analytics busy; retry shortly"); this.name = "AnalyticsBusyError" }
+}
+
+// No unbounded wait queue: sending and event ingestion keep their pool capacity.
+let analyticsActive = false
+
+export function buildEventIdQuery(params: EventsProps) {
+    const order = Prisma.raw(params.order === "asc" ? "ASC" : "DESC")
+    const comparison = Prisma.raw(params.order === "asc" ? ">" : "<")
+    const offset = params.cursor ? 0 : params.start
+    if (offset > 10000 || !Number.isSafeInteger(offset + params.limit)) fail("Invalid query parameter: start")
     const cursor = params.cursor
-    // This keyset is stable and duplicate-free only for a fixed result set; it is not cross-request snapshot isolation.
-    // A concurrent insert at the cursor's exact created timestamp may sort behind a random UUID cursor and be recovered by polling/deduplication.
-    const seek = cursor && {
-        OR: params.order === "asc"
-            ? [
-                { created: { gt: new Date(cursor.created) } },
-                { created: new Date(cursor.created), id: { gt: cursor.id } },
-            ]
-            : [
-                { created: { lt: new Date(cursor.created) } },
-                { created: new Date(cursor.created), id: { lt: cursor.id } },
-            ],
-    }
+    const seek = cursor ? Prisma.sql`AND (n.created ${comparison} ${new Date(cursor.created)}
+        OR (n.created = ${new Date(cursor.created)} AND n.id ${comparison} ${cursor.id}))` : Prisma.empty
+    // Each equality on type can walk (type, created, id) in result order.
+    // Merge only the page-sized ID streams, never millions of rawEvent payloads.
+    const branches = [...new Set(eventTypes(params.type))].map(type => Prisma.sql`(
+        SELECT n.id, n.created FROM NewsletterNotifications n
+        FORCE INDEX (idx_notifications_type_created_id)
+        STRAIGHT_JOIN NewsletterMessages m ON m.messageId = n.messageId
+        STRAIGHT_JOIN NewsletterBatch b ON b.id = m.newsletterBatchId
+        WHERE n.type = ${type} AND b.siteId = ${params.siteId}
+          AND n.created > ${new Date(params.begin * 1000)} AND n.created < ${new Date(params.end * 1000)}
+          ${seek}
+        ORDER BY n.created ${order}, n.id ${order} LIMIT ${offset + params.limit}
+    )`)
+    return Prisma.sql`SELECT /*+ MAX_EXECUTION_TIME(2000) */ id, created
+        FROM (${Prisma.join(branches, " UNION ALL ")}) AS page_ids
+        ORDER BY created ${order}, id ${order} LIMIT ${params.limit} OFFSET ${offset}`
+}
 
-    const result = await prisma.newsletterNotifications.findMany({
-        ...(cursor ? {} : { skip: params.start }),
-        take: params.limit,
-        orderBy: [{ created: params.order }, { id: params.order }],
-        include: {
-            newsletter: {
-                include: { newsletterBatch: true },
+/** Read one bounded page; never sort event bodies or campaign contents. */
+export async function getEmailEvents(params: EventsProps) {
+    if (analyticsActive) throw new AnalyticsBusyError()
+    analyticsActive = true
+    try {
+        const ids = await prisma.$queryRaw<{ id: string, created: Date }[]>(buildEventIdQuery(params))
+        const rows = ids.length ? await prisma.newsletterNotifications.findMany({
+            where: { id: { in: ids.map(row => row.id) } },
+            select: {
+                id: true, created: true, timestamp: true, type: true, messageId: true, rawEvent: true,
+                newsletter: { select: { toEmail: true, newsletterBatch: { select: { batchId: true } } } },
             },
-        },
-        where: {
-            type: { in: eventTypes(params.type) },
-            newsletter: { newsletterBatch: { siteId: params.siteId } },
-            created: timeRange,
-            ...(seek ? { AND: [seek] } : {}),
-        },
-    })
-
-    const last = result.at(-1)
-    const nextCursor = last
-        ? { v: 1 as const, created: last.created.toISOString(), id: last.id, order: params.order }
-        : cursor
-    return formatAsMailgunEvent(result, getNextPageUrl(params.url, nextCursor))
+        }) : []
+        const byId = new Map(rows.map(row => [row.id, row]))
+        const result = ids.flatMap(row => { const event = byId.get(row.id); return event ? [event] : [] })
+        // Advance using the selected IDs even if a concurrent retention pass removed a payload.
+        const last = ids.at(-1)
+        const nextCursor = last
+            ? { v: 1 as const, created: last.created.toISOString(), id: last.id, order: params.order }
+            : params.cursor
+        return formatAsMailgunEvent(result, getNextPageUrl(params.url, nextCursor))
+    } finally {
+        analyticsActive = false
+    }
 }
 
 /** Validates the documented Mailgun-compatible analytics query contract. */
 export function validateQueryParams(searchParams: URLSearchParams): QueryParams {
     const event = searchParams.get("event")
     if (!event || event.trim() === "") fail("Missing required query parameter: event")
+    if (event.length > 512 || eventTypes(event).length > 16) fail("Too many event types")
 
     const limit = parseInteger(searchParams.get("limit"), "limit", 300)
     if (limit < 1 || limit > 300) fail("Invalid query parameter: limit")
 
     const start = parseInteger(searchParams.get("start"), "start", 0)
-    if (start < 0) fail("Invalid query parameter: start")
+    if (start < 0 || start > 10000) fail("Invalid query parameter: start")
 
     // Mailgun-compatible bounds are optional. Current Ghost omits `end` on
     // its normal incremental analytics fetch.

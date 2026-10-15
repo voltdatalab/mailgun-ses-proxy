@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { findMany } = vi.hoisted(() => ({ findMany: vi.fn() }))
+const { findMany, queryRaw } = vi.hoisted(() => ({ findMany: vi.fn(), queryRaw: vi.fn() }))
 vi.mock('@/service/database/db', () => ({
-    prisma: { newsletterNotifications: { findMany } },
+    prisma: { $queryRaw: queryRaw, newsletterNotifications: { findMany } },
 }))
 
 import {
@@ -23,8 +23,10 @@ const event = (id: string, created: string) => ({
     newsletter: { toEmail: 'recipient@example.test', newsletterBatch: { batchId: 'batch-1' } },
 })
 
+function setRows(rows: ReturnType<typeof event>[]) { findMany.mockResolvedValue(rows); queryRaw.mockResolvedValue(rows.map(({id,created}) => ({id,created}))) }
+
 describe('analytics keyset pagination', () => {
-    beforeEach(() => findMany.mockReset())
+    beforeEach(() => { findMany.mockReset(); queryRaw.mockReset() })
 
     it('validates the Mailgun query contract', () => {
         expect(validateQueryParams(new URL(base).searchParams)).toMatchObject({
@@ -37,7 +39,7 @@ describe('analytics keyset pagination', () => {
         for (const query of [
             'event=delivered&begin=2&end=2', 'event=delivered&begin=no&end=2',
             'event=delivered&begin=1&end=2&limit=0', 'event=delivered&begin=1&end=2&limit=301',
-            'event=delivered&begin=1&end=2&start=-1', 'event=delivered&begin=1&end=2&ascending=maybe',
+            'event=delivered&begin=1&end=2&start=-1', 'event=delivered&begin=1&end=2&start=10001', 'event=delivered&begin=1&end=2&ascending=maybe',
             'event=%20&begin=1&end=2',
         ]) expect(() => validateQueryParams(new URL(`https://x.test/?${query}`).searchParams)).toThrow(QueryValidationError)
     })
@@ -84,14 +86,15 @@ describe('analytics keyset pagination', () => {
     })
 
     it('uses legacy offset only on the first request, with stable created/id ordering', async () => {
-        findMany.mockResolvedValue([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])
+        setRows([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])
         const query = validateQueryParams(new URL(base).searchParams)
         const result = await fetchAnalyticsEvents(query, 'site-1', base)
-        const args = findMany.mock.calls[0][0]
+        const args = queryRaw.mock.calls[0][0]
 
-        expect(args.skip).toBe(4)
-        expect(args.orderBy).toEqual([{ created: 'asc' }, { id: 'asc' }])
-        expect(args.where.type).toEqual({ in: ['delivered', 'opened'] })
+        expect(args.sql).toContain('ORDER BY created ASC, id ASC')
+        expect(args.values.at(-1)).toBe(4)
+        expect(args.values).toContain('delivered')
+        expect(args.values).toContain('opened')
         const next = new URL(result.paging.next)
         expect(next.searchParams.get('start')).toBeNull()
         expect(next.searchParams.get('tag')).toBe('campaign')
@@ -100,7 +103,7 @@ describe('analytics keyset pagination', () => {
     })
 
     it('preserves a legacy empty page offset and filters without adding a cursor', async () => {
-        findMany.mockResolvedValue([])
+        setRows([])
         const query = validateQueryParams(new URL(base).searchParams)
         const result = await fetchAnalyticsEvents(query, 'site-1', base)
         const next = new URL(result.paging.next)
@@ -116,38 +119,34 @@ describe('analytics keyset pagination', () => {
         expect(next.searchParams.get('tag')).toBe('campaign')
 
         await fetchAnalyticsEvents(validateQueryParams(next.searchParams), 'site-1', next.toString())
-        expect(findMany.mock.calls[1][0].skip).toBe(4)
+        expect(queryRaw.mock.calls[1][0].values.at(-1)).toBe(4)
     })
 
     it('uses the created/id lexicographic seek after duplicate timestamps without skip', async () => {
         const first = validateQueryParams(new URL(base).searchParams)
-        findMany.mockResolvedValue([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])
+        setRows([event('a', '2026-01-01T00:00:00.000Z'), event('b', '2026-01-01T00:00:00.000Z')])
         const firstResult = await fetchAnalyticsEvents(first, 'site-1', base)
         const secondUrl = new URL(firstResult.paging.next)
         const second = validateQueryParams(secondUrl.searchParams)
-        findMany.mockResolvedValue([event('c', '2026-01-01T00:00:00.000Z')])
+        setRows([event('c', '2026-01-01T00:00:00.000Z')])
         await fetchAnalyticsEvents(second, 'site-1', secondUrl.toString())
-        const args = findMany.mock.calls[1][0]
+        const args = queryRaw.mock.calls[1][0]
+        expect(args.values.at(-1)).toBe(0)
+        expect(args.sql).toContain('n.id > ?')
+        expect(args.values).toContain('b')
 
-        expect(args.skip).toBeUndefined()
-        expect(args.where.AND).toEqual([{ OR: [
-            { created: { gt: new Date('2026-01-01T00:00:00.000Z') } },
-            { created: new Date('2026-01-01T00:00:00.000Z'), id: { gt: 'b' } },
-        ] }])
     })
 
     it('uses inverse seek for descending cursors and rejects malformed or order-mismatched cursors', async () => {
         const cursor = Buffer.from(JSON.stringify({ v: 1, created: '2026-01-01T00:00:00.000Z', id: 'a', order: 'desc' })).toString('base64url')
         const url = new URL(`https://x.test/?event=delivered&begin=1&end=2&cursor=${cursor}`)
-        findMany.mockResolvedValue([event('z', '2026-01-02T00:00:00.000Z')])
+        setRows([event('z', '2026-01-02T00:00:00.000Z')])
         const first = await fetchAnalyticsEvents(validateQueryParams(url.searchParams), 'site-1', url.toString())
         const next = new URL(first.paging.next)
-        findMany.mockResolvedValue([])
+        setRows([])
         await fetchAnalyticsEvents(validateQueryParams(next.searchParams), 'site-1', next.toString())
-        expect(findMany.mock.calls[1][0].where.AND).toEqual([{ OR: [
-            { created: { lt: new Date('2026-01-02T00:00:00.000Z') } },
-            { created: new Date('2026-01-02T00:00:00.000Z'), id: { lt: 'z' } },
-        ] }])
+        expect(queryRaw.mock.calls[1][0].sql).toContain('n.id < ?')
+        expect(queryRaw.mock.calls[1][0].values).toContain('z')
         expect(() => validateQueryParams(new URL('https://x.test/?event=x&begin=1&end=2&cursor=not-a-cursor').searchParams)).toThrow(QueryValidationError)
         expect(() => validateQueryParams(new URL(`https://x.test/?event=x&begin=1&end=2&ascending=true&cursor=${next.searchParams.get('cursor')}`).searchParams)).toThrow(QueryValidationError)
     })
@@ -155,7 +154,7 @@ describe('analytics keyset pagination', () => {
     it('keeps an empty page next URL deterministic without advancing its cursor', async () => {
         const cursor = Buffer.from(JSON.stringify({ v: 1, created: '2026-01-01T00:00:00.000Z', id: 'a', order: 'desc' })).toString('base64url')
         const url = new URL(`https://x.test/?event=delivered&begin=1&end=2&cursor=${cursor}`)
-        findMany.mockResolvedValue([])
+        setRows([])
         const result = await fetchAnalyticsEvents(validateQueryParams(url.searchParams), 'site-1', url.toString())
         expect(result.items).toEqual([])
         expect(result.paging.next).toBe(url.toString())
