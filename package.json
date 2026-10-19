@@ -16,10 +16,11 @@
         "db:generate": "prisma generate",
         "reconcile:newsletter-orphan": "NODE_ENV=production bun dist/scripts/reconcile-newsletter-orphan.js",
         "retention:newsletter": "NODE_ENV=production bun dist/scripts/newsletter-retention.js",
+        "retention:newsletter:preflight": "node dist/scripts/newsletter-retention-readonly-preflight.js",
         "test": "runPrismaTests=false vitest",
         "test:prisma": "vitest --run tests/prisma-orm.test.ts",
         "test:run": "runPrismaTests=false vitest --run",
-        "test:ci:db": "sh -c 'mkdir -p artifacts; runPrismaTests=true vitest run --reporter=json --outputFile=artifacts/vitest-report.json; status=$?; node scripts/assert-vitest-report.mjs artifacts/vitest-report.json; report_status=$?; exit $((status || report_status))'",
+        "test:ci:db": "node scripts/test-ci-db.mjs",
         "test:analytics-index-migration": "node scripts/test-analytics-index-migration.mjs",
         "test:retention-link-helper": "node --no-warnings scripts/test-newsletter-retention-link-helper.mjs",
         "test:coverage": "vitest --coverage",
@@ -65,7 +66,7 @@
         "deepmerge-ts": "8.0.2",
         "fast-uri": "3.1.8",
         "sharp": "0.35.5",
-        "mysql2": "3.23.1",
+        "mysql2": "3.24.5",
         "braces": "$braces",
         "brace-expansion@^4.0.1": "5.0.12"
     }

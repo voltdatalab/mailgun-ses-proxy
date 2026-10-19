@@ -299,6 +299,21 @@ afterEach(async () => {
 })
 
 describe('newsletter retention CLI engine', () => {
+    it('does not admit old restore evidence through archive JSON or a bypass flag', async () => {
+        const harness = makeDependencies()
+        harness.readJsonFile.mockResolvedValueOnce({
+            ...evidence,
+            backup: { verifiedAt: '2026-01-02T00:00:00.000Z', restoredAt: '2026-01-02T00:00:00.000Z' },
+            restore: { verifiedAt: '2026-01-02T00:00:00.000Z', restoredAt: '2026-01-02T00:00:00.000Z' },
+            archiveCoverage: { verified: true, allowOldRestore: true },
+        })
+        await expect(executeNewsletterRetentionCli(baseArgs(), harness.dependencies)).rejects.toThrow('invalid or stale')
+        expect(harness.createLockProvider).not.toHaveBeenCalled()
+        expect(harness.database.newsletterBatch.findMany).not.toHaveBeenCalled()
+        expect(harness.openVerifiedEscrowSource).not.toHaveBeenCalled()
+        expect(harness.transaction).not.toHaveBeenCalled()
+    })
+
     it('defaults to dry-run, reads candidates only, and emits no private record or message IDs', async () => {
         const harness = makeDependencies()
 
