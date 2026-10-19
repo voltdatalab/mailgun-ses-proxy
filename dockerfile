@@ -12,6 +12,7 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 RUN npm ci
 
 COPY . .
@@ -36,6 +37,7 @@ RUN chown -R bun:bun /app
 USER bun
 
 COPY --chown=bun:bun package.json package-lock.json bun.lock ./
+COPY --chown=bun:bun vendor ./vendor
 RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun . .

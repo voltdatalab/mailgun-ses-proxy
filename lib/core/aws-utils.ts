@@ -140,7 +140,7 @@ export function parseNotificationEvent(messageId: string, inputEvent: string): N
 }
 
 type MailgunEventPayload = Prisma.NewsletterNotificationsGetPayload<{
-    include: { newsletter: { include: { newsletterBatch: true } } }
+    select: { id: true, created: true, timestamp: true, type: true, messageId: true, rawEvent: true, newsletter: { select: { toEmail: true, newsletterBatch: { select: { batchId: true } } } } }
 }>
 
 export function formatAsMailgunEvent(event: MailgunEventPayload[], url: string) {

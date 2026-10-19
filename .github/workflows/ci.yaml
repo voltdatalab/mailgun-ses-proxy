@@ -104,6 +104,7 @@ jobs:
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
         env:
+          RUN_EVENTS_MYSQL: 'true'
           RETENTION_HISTORICAL_DB_CI: '1'
           RETENTION_HISTORICAL_DB_ENGINE: mysql
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -153,6 +154,7 @@ jobs:
           CI_DB_ROOT_PASSWORD: ci-root-password
       - run: npm run test:ci:db
         env:
+          RUN_EVENTS_MYSQL: 'true'
           RETENTION_HISTORICAL_DB_CI: '1'
           RETENTION_HISTORICAL_DB_ENGINE: mariadb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

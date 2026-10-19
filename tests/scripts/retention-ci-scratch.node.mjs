@@ -107,6 +107,12 @@ test('workflow and real safe runner retain connected preflight and mandatory scr
     const workflow = await readFile('.github/workflows/ci.yaml', 'utf8')
     assert.match(workflow, /run: node --test[^\n]*tests\/scripts\/retention-ci-scratch.node.mjs/)
     assert.equal(workflow.match(/run: npm run test:ci:db/g).length, 2)
+    assert.equal(workflow.match(/RUN_EVENTS_MYSQL: 'true'/g)?.length ?? 0, 2)
+    for (const engine of ['mysql', 'mariadb']) {
+        assert.ok(workflow.includes(`- run: npm run test:ci:db\n        env:\n          RUN_EVENTS_MYSQL: 'true'\n          RETENTION_HISTORICAL_DB_CI: '1'\n          RETENTION_HISTORICAL_DB_ENGINE: ${engine}`))
+    }
+    const manifest = JSON.parse(await readFile('package.json', 'utf8'))
+    assert.equal(manifest.scripts['test:ci:db'], 'node scripts/test-ci-db.mjs')
 })
 test('actual six-phase DB entry selects private allocator, never RUNNER_TEMP', () => {
     const phases = []

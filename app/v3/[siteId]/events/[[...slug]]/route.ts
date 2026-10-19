@@ -1,6 +1,6 @@
 import logger from "@/lib/core/logger"
 import { errorClass } from "@/lib/core/error-class"
-import { fetchAnalyticsEvents, QueryValidationError, validateQueryParams } from "@/service/events-service/events-utils"
+import { AnalyticsBusyError, fetchAnalyticsEvents, QueryValidationError, validateQueryParams } from "@/service/events-service/events-utils"
 import { NextRequest } from "next/server"
 
 const log = logger.child({ module: "app/v3/events" })
@@ -47,6 +47,9 @@ async function fetchAnalyticsEvent(req: NextRequest, { params }: pathParam) {
         return Response.json(events, { status: 200 })
     } catch (e) {
         log.error({ errorClass: errorClass(e) }, "error when fetching analytics events")
+        if (e instanceof AnalyticsBusyError) {
+            return Response.json({ message: "Analytics busy; retry shortly" }, { status: 503, headers: { "Retry-After": "5" } })
+        }
         if (e instanceof QueryValidationError) {
             return Response.json({ message: e.message }, { status: 400 })
         }
